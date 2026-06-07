@@ -380,10 +380,14 @@
     font-family: 'Share Tech Mono', monospace;
     font-size: 16px;
     letter-spacing: 3px;
+    line-height: 1.7;
     color: var(--warn);
     text-transform: uppercase;
     outline: none;
     margin-bottom: 12px;
+    min-height: 92px;
+    resize: none;
+    overflow: hidden;
     transition: border-color 0.2s;
   }
 
@@ -666,6 +670,11 @@
     <div class="progress-bar">
       <div class="progress-fill" id="progress-fill" style="width:0%"></div>
     </div>
+
+    <div id="ocr-debug" style="display:none; margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.2);">
+      <div style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:6px; font-family:'Share Tech Mono',monospace;">OCR 原始辨識文字</div>
+      <pre id="ocr-raw-text" style="white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.5; color:var(--text); font-family:'Share Tech Mono',monospace;"></pre>
+    </div>
   </div>
 
   <!-- STEP 3: 確認序號 -->
@@ -674,12 +683,13 @@
 
     <div class="key-label" style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:8px; font-family:'Share Tech Mono',monospace;">辨識結果（可手動修正）</div>
 
-    <input type="text"
+    <textarea
       id="key-input"
-      placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
-      maxlength="35"
+      rows="2"
+      placeholder="XXXXX-XXXXX-XXXXX&#10;XXXXX-XXXXX"
+      maxlength="40"
       oninput="formatKeyInput(this)"
-    >
+    ></textarea>
 
     <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
 
@@ -801,8 +811,14 @@ function processImage(dataUrl) {
 
   const statusEl = document.getElementById('ocr-status-text');
   const progressEl = document.getElementById('progress-fill');
+  const debugEl = document.getElementById('ocr-debug');
+  const rawTextEl = document.getElementById('ocr-raw-text');
+  if (debugEl) debugEl.style.display = 'none';
+  if (rawTextEl) rawTextEl.textContent = '';
 
   Tesseract.recognize(dataUrl, 'eng', {
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+    preserve_interword_spaces: '1',
     logger: m => {
       if (m.status === 'recognizing text') {
         const pct = Math.round(m.progress * 100);
@@ -812,6 +828,8 @@ function processImage(dataUrl) {
     }
   }).then(({ data: { text } }) => {
     progressEl.style.width = '100%';
+    if (rawTextEl) rawTextEl.textContent = text.trim() || '（沒有辨識到任何文字）';
+    if (debugEl) debugEl.style.display = 'block';
 
     const key = extractProductKey(text);
     if (key) {
@@ -857,25 +875,31 @@ function showConfirm(key) {
   showSection('sec-confirm');
   setStep(3);
   const input = document.getElementById('key-input');
-  input.value = key;
-  validateKey(key);
+  input.value = formatKeyForDisplay(key);
+  validateKey(input.value);
 }
 
 function formatKeyInput(el) {
-  let v = el.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  let out = '';
-  for (let i = 0; i < Math.min(v.length, 25); i++) {
-    if (i > 0 && i % 5 === 0) out += '-';
-    out += v[i];
-  }
-  el.value = out;
-  validateKey(out);
+  el.value = formatKeyForDisplay(el.value);
+  validateKey(el.value);
+}
+
+function normalizeKey(key) {
+  const clean = key.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 25);
+  const groups = clean.match(/.{1,5}/g) || [];
+  return groups.join('-');
+}
+
+function formatKeyForDisplay(key) {
+  const groups = normalizeKey(key).split('-').filter(Boolean);
+  if (groups.length <= 3) return groups.join('-');
+  return `${groups.slice(0, 3).join('-')}\n${groups.slice(3, 5).join('-')}`;
 }
 
 function validateKey(key) {
   const hint = document.getElementById('key-valid-hint');
   const btn = document.getElementById('btn-gen-qr');
-  const clean = key.replace(/-/g, '');
+  const clean = key.replace(/[^A-Za-z0-9]/g, '');
   if (clean.length === 25) {
     hint.textContent = '✓ 格式正確 (25碼)';
     hint.style.color = 'var(--success)';
@@ -889,7 +913,7 @@ function validateKey(key) {
 
 // ─── QR Code ──────────────────────────────────────────────
 function generateQR() {
-  const key = document.getElementById('key-input').value.trim();
+  const key = normalizeKey(document.getElementById('key-input').value);
   currentKey = key;
 
   showSection('sec-qr');
@@ -928,6 +952,8 @@ function resetAll() {
   document.getElementById('key-input').value = '';
   document.getElementById('qr-box').innerHTML = '';
   document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('ocr-debug').style.display = 'none';
+  document.getElementById('ocr-raw-text').textContent = '';
 
   showSection('sec-capture');
   setStep(1);
