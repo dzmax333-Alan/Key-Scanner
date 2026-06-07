@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Key Scanner — Windows 序號掃描器</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --panel: #111827;
+    --border: #1e3a5f;
+    --accent: #00d4ff;
+    --accent2: #ff6b35;
+    --success: #00ff88;
+    --warn: #ffd60a;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --glow: 0 0 20px rgba(0,212,255,0.3);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Exo 2', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Animated grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 16px;
+    padding-bottom: 40px;
+  }
+
+  /* Header */
+  header {
+    text-align: center;
+    padding: 24px 0 20px;
+  }
+
+  .logo-line {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), #0066ff);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+    box-shadow: var(--glow);
+  }
+
+  h1 {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: linear-gradient(90deg, var(--accent), #fff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  /* Step indicator */
+  .steps {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 20px 0;
+  }
+
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .step-num {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    transition: all 0.3s;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  .step.active .step-num {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: 0 0 12px rgba(0,212,255,0.4);
+  }
+
+  .step.done .step-num {
+    background: var(--success);
+    border-color: var(--success);
+    color: #000;
+  }
+
+  .step-label {
+    font-size: 9px;
+    color: var(--muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .step.active .step-label { color: var(--accent); }
+  .step.done .step-label { color: var(--success); }
+
+  .step-line {
+    width: 32px; height: 2px;
+    background: var(--border);
+    margin-bottom: 14px;
+    transition: background 0.3s;
+  }
+
+  .step-line.done { background: var(--success); }
+
+  /* Panel */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .panel::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.6;
+  }
+
+  .panel-title {
+    font-size: 10px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-family: 'Share Tech Mono', monospace;
+    margin-bottom: 14px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* Camera area */
+  #preview-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4/3;
+    background: #000;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+  }
+
+  #preview {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* Scanning frame overlay */
+  .scan-frame {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .scan-frame-inner {
+    width: 80%; height: 40%;
+    position: relative;
+  }
+
+  .scan-frame-inner::before,
+  .scan-frame-inner::after,
+  .sf-bl, .sf-br {
+    content: '';
+    position: absolute;
+    width: 20px; height: 20px;
+    border-color: var(--accent);
+    border-style: solid;
+  }
+
+  .scan-frame-inner::before { top: 0; left: 0; border-width: 2px 0 0 2px; }
+  .scan-frame-inner::after  { top: 0; right: 0; border-width: 2px 2px 0 0; }
+  .sf-bl { bottom: 0; left: 0; border-width: 0 0 2px 2px; }
+  .sf-br { bottom: 0; right: 0; border-width: 0 2px 2px 0; }
+
+  .scan-line {
+    position: absolute;
+    left: 10%; right: 10%;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: scan 2s ease-in-out infinite;
+    box-shadow: 0 0 8px var(--accent);
+  }
+
+  @keyframes scan {
+    0%   { top: 15%; opacity: 1; }
+    50%  { top: 75%; opacity: 1; }
+    100% { top: 15%; opacity: 1; }
+  }
+
+  .hint-overlay {
+    position: absolute;
+    bottom: 8px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 10px;
+    color: rgba(255,255,255,0.5);
+    font-family: 'Share Tech Mono', monospace;
+    letter-spacing: 1px;
+  }
+
+  /* Captured image preview */
+  #captured-wrap {
+    display: none;
+    position: relative;
+    width: 100%;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+  }
+
+  #captured-img {
+    width: 100%;
+    display: block;
+  }
+
+  /* Buttons */
+  .btn {
+    width: 100%;
+    padding: 14px;
+    border-radius: 10px;
+    border: none;
+    font-family: 'Exo 2', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #0066ff);
+    color: #000;
+    box-shadow: 0 4px 20px rgba(0,212,255,0.3);
+  }
+
+  .btn-primary:active { transform: scale(0.97); }
+
+  .btn-secondary {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    font-size: 11px;
+    padding: 10px;
+    margin-top: 8px;
+  }
+
+  .btn-secondary:active { background: rgba(255,255,255,0.05); }
+
+  .btn-success {
+    background: linear-gradient(135deg, var(--success), #00aa55);
+    color: #000;
+    box-shadow: 0 4px 20px rgba(0,255,136,0.3);
+  }
+
+  .btn-warn {
+    background: linear-gradient(135deg, var(--accent2), #ff3355);
+    color: #fff;
+    box-shadow: 0 4px 20px rgba(255,107,53,0.3);
+  }
+
+  .btn:disabled {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  /* Key display */
+  .key-display {
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 14px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  .key-label {
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--muted);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .key-value {
+    font-size: 18px;
+    letter-spacing: 4px;
+    color: var(--warn);
+    word-break: break-all;
+    line-height: 1.6;
+  }
+
+  .key-value span {
+    color: var(--text);
+  }
+
+  .key-value .dash { color: var(--muted); }
+
+  /* Editable key input */
+  #key-input {
+    width: 100%;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 16px;
+    letter-spacing: 3px;
+    color: var(--warn);
+    text-transform: uppercase;
+    outline: none;
+    margin-bottom: 12px;
+    transition: border-color 0.2s;
+  }
+
+  #key-input:focus { border-color: var(--accent); }
+  #key-input::placeholder { color: var(--muted); letter-spacing: 2px; font-size: 12px; }
+
+  /* OCR status */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-family: 'Share Tech Mono', monospace;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+
+  .status-bar.processing {
+    background: rgba(0,212,255,0.1);
+    border: 1px solid rgba(0,212,255,0.2);
+    color: var(--accent);
+  }
+
+  .status-bar.success {
+    background: rgba(0,255,136,0.1);
+    border: 1px solid rgba(0,255,136,0.2);
+    color: var(--success);
+  }
+
+  .status-bar.error {
+    background: rgba(255,107,53,0.1);
+    border: 1px solid rgba(255,107,53,0.2);
+    color: var(--accent2);
+  }
+
+  .status-bar.warning {
+    background: rgba(255,214,10,0.1);
+    border: 1px solid rgba(255,214,10,0.2);
+    color: var(--warn);
+  }
+
+  .spinner {
+    width: 12px; height: 12px;
+    border: 2px solid rgba(0,212,255,0.3);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-bar {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), #0066ff);
+    border-radius: 2px;
+    transition: width 0.3s;
+    box-shadow: 0 0 8px var(--accent);
+  }
+
+  /* QR Code area */
+  #qr-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+
+  #qr-box {
+    width: 200px; height: 200px;
+    background: #fff;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    box-shadow: 0 0 30px rgba(0,212,255,0.3), 0 0 60px rgba(0,212,255,0.1);
+    border: 3px solid var(--accent);
+  }
+
+  #qr-box canvas, #qr-box img { border-radius: 4px; }
+
+  .qr-hint {
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  .qr-key-confirm {
+    background: rgba(0,255,136,0.05);
+    border: 1px solid rgba(0,255,136,0.2);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    color: var(--success);
+    letter-spacing: 3px;
+    text-align: center;
+    width: 100%;
+    word-break: break-all;
+  }
+
+  /* Hidden input for file */
+  #file-input { display: none; }
+
+  /* Divider */
+  .or-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 2px;
+    margin: 10px 0;
+  }
+
+  .or-divider::before, .or-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* Counter */
+  .counter-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(0,212,255,0.1);
+    border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 10px;
+    font-family: 'Share Tech Mono', monospace;
+    color: var(--accent);
+    letter-spacing: 1px;
+    margin-bottom: 14px;
+  }
+
+  .counter-num {
+    font-size: 16px;
+    font-weight: 800;
+    color: var(--warn);
+  }
+
+  /* Reset / new scan */
+  .reset-area {
+    text-align: center;
+    margin-top: 10px;
+  }
+
+  /* Pulse dot */
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  /* Section hidden/visible */
+  .section { display: none; }
+  .section.active { display: block; }
+
+  /* Camera stream */
+  #stream { display: none; }
+  #stream.active { display: block; }
+
+  video#stream {
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo-line">
+      <div class="logo-icon">🔑</div>
+      <h1>Key Scanner</h1>
+    </div>
+    <div class="subtitle">Windows 序號辨識系統</div>
+  </header>
+
+  <!-- Step indicator -->
+  <div class="steps" id="steps">
+    <div class="step active" id="s1">
+      <div class="step-num">01</div>
+      <div class="step-label">拍照</div>
+    </div>
+    <div class="step-line" id="l1"></div>
+    <div class="step active" id="s2">
+      <div class="step-num">02</div>
+      <div class="step-label">辨識</div>
+    </div>
+    <div class="step-line" id="l2"></div>
+    <div class="step" id="s3">
+      <div class="step-num">03</div>
+      <div class="step-label">確認</div>
+    </div>
+    <div class="step-line" id="l3"></div>
+    <div class="step" id="s4">
+      <div class="step-num">04</div>
+      <div class="step-label">QR碼</div>
+    </div>
+  </div>
+
+  <!-- 完成計數 -->
+  <div style="text-align:center;">
+    <div class="counter-badge">
+      <span>已完成</span>
+      <span class="counter-num" id="done-count">0</span>
+      <span>台</span>
+    </div>
+  </div>
+
+  <!-- STEP 1: 拍照 -->
+  <div class="panel section active" id="sec-capture">
+    <div class="panel-title">步驟 01 — 拍攝貼紙</div>
+
+    <div id="preview-wrap">
+      <video id="stream" autoplay playsinline></video>
+      <img id="preview" src="" alt="" style="display:none;">
+      <div class="scan-frame">
+        <div class="scan-frame-inner">
+          <div class="sf-bl"></div>
+          <div class="sf-br"></div>
+          <div class="scan-line"></div>
+        </div>
+      </div>
+      <div class="hint-overlay">將序號貼紙對準框內</div>
+    </div>
+
+    <button class="btn btn-primary" id="btn-camera" onclick="startCamera()">
+      📷 開啟相機
+    </button>
+
+    <button class="btn btn-primary" id="btn-shoot" onclick="shootPhoto()" style="display:none;">
+      ⚡ 拍照辨識
+    </button>
+
+    <div class="or-divider">或</div>
+
+    <input type="file" id="file-input" accept="image/*" capture="environment" onchange="handleFile(event)">
+    <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">
+      🖼️ 從相簿選擇圖片
+    </button>
+    <div id="camera-error" style="display:none; margin-top:12px; font-size:12px; line-height:1.6; color:var(--warn); font-family:'Share Tech Mono',monospace;"></div>
+  </div>
+
+  <!-- STEP 2: OCR 處理中 -->
+  <div class="panel section" id="sec-ocr">
+    <div class="panel-title">步驟 02 — AI 辨識中</div>
+
+    <div id="captured-wrap">
+      <img id="captured-img" src="" alt="">
+    </div>
+
+    <div class="status-bar processing" id="ocr-status">
+      <div class="spinner"></div>
+      <span id="ocr-status-text">初始化辨識引擎...</span>
+    </div>
+
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- STEP 3: 確認序號 -->
+  <div class="panel section" id="sec-confirm">
+    <div class="panel-title">步驟 03 — 確認序號</div>
+
+    <div class="key-label" style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:8px; font-family:'Share Tech Mono',monospace;">辨識結果（可手動修正）</div>
+
+    <input type="text"
+      id="key-input"
+      placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+      maxlength="35"
+      oninput="formatKeyInput(this)"
+    >
+
+    <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
+
+    <button class="btn btn-success" id="btn-gen-qr" onclick="generateQR()">
+      ✅ 確認，產生 QR Code
+    </button>
+
+    <button class="btn btn-secondary" onclick="resetAll()">
+      🔄 重新拍照
+    </button>
+  </div>
+
+  <!-- STEP 4: QR Code -->
+  <div class="panel section" id="sec-qr">
+    <div class="panel-title">步驟 04 — 掃描 QR Code</div>
+
+    <div id="qr-wrap">
+      <div id="qr-box"></div>
+      <div class="qr-key-confirm" id="qr-key-text"></div>
+      <div class="qr-hint">
+        <div>用藍牙條碼槍掃描上方 QR Code</div>
+        <div style="margin-top:4px; color:var(--success);">▶ 自動輸入到 Windows 啟動視窗</div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;">
+      <button class="btn btn-warn" onclick="nextDevice()">
+        ➡️ 下一台（重新掃描）
+      </button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Hidden canvas for capture -->
+<canvas id="capture-canvas" style="display:none;"></canvas>
+
+<script>
+let stream = null;
+let doneCount = 0;
+let currentKey = '';
+
+// ─── Camera ───────────────────────────────────────────────
+async function startCamera() {
+  const errorEl = document.getElementById('camera-error');
+  if (errorEl) errorEl.style.display = 'none';
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showCameraFallback('這個瀏覽器不能直接開啟即時相機，已改用手機拍照上傳。');
+    return;
+  }
+
+  try {
+    const s = await navigator.mediaDevices.getUserMedia(getCameraConstraints());
+    stream = s;
+    const video = document.getElementById('stream');
+    video.srcObject = s;
+    await video.play();
+    video.style.display = 'block';
+    document.getElementById('preview').style.display = 'none';
+    document.getElementById('btn-camera').style.display = 'none';
+    document.getElementById('btn-shoot').style.display = 'flex';
+  } catch (e) {
+    showCameraFallback(`無法開啟即時相機：${e && e.name ? e.name : '權限或瀏覽器限制'}。已改用手機拍照上傳。`);
+  }
+}
+
+function getCameraConstraints() {
+  return {
+    video: {
+      facingMode: { ideal: 'environment' },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 }
+    },
+    audio: false
+  };
+}
+
+function showCameraFallback(message) {
+  const errorEl = document.getElementById('camera-error');
+  if (errorEl) {
+    errorEl.textContent = message + ' 若要使用即時預覽相機，請用 HTTPS 網址開啟此頁。';
+    errorEl.style.display = 'block';
+  }
+  const input = document.getElementById('file-input');
+  if (input) input.click();
+}
+
+function shootPhoto() {
+  const video = document.getElementById('stream');
+  const canvas = document.getElementById('capture-canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+  processImage(dataUrl);
+}
+
+function handleFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => processImage(ev.target.result);
+  reader.readAsDataURL(file);
+}
+
+// ─── OCR ──────────────────────────────────────────────────
+function processImage(dataUrl) {
+  // Stop camera
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+
+  // Show captured image
+  document.getElementById('captured-img').src = dataUrl;
+  document.getElementById('captured-wrap').style.display = 'block';
+
+  // Switch to OCR section
+  showSection('sec-ocr');
+  setStep(2);
+
+  const statusEl = document.getElementById('ocr-status-text');
+  const progressEl = document.getElementById('progress-fill');
+
+  Tesseract.recognize(dataUrl, 'eng', {
+    logger: m => {
+      if (m.status === 'recognizing text') {
+        const pct = Math.round(m.progress * 100);
+        progressEl.style.width = pct + '%';
+        statusEl.textContent = `辨識中... ${pct}%`;
+      }
+    }
+  }).then(({ data: { text } }) => {
+    progressEl.style.width = '100%';
+
+    const key = extractProductKey(text);
+    if (key) {
+      setOcrStatus('success', '✓ 辨識成功！');
+      setTimeout(() => showConfirm(key), 500);
+    } else {
+      setOcrStatus('warning', '⚠ 未找到標準格式，請手動輸入');
+      setTimeout(() => showConfirm(''), 600);
+    }
+  }).catch(err => {
+    setOcrStatus('error', '✗ 辨識失敗，請手動輸入');
+    setTimeout(() => showConfirm(''), 600);
+  });
+}
+
+function extractProductKey(text) {
+  // Windows Product Key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+  const cleaned = text.replace(/\s+/g, ' ').toUpperCase();
+  // Try standard 5x5 format
+  const m = cleaned.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
+  if (m) return m[0];
+  // Try without dashes (25 consecutive alphanumeric)
+  const m2 = cleaned.match(/[A-Z0-9]{25}/);
+  if (m2) {
+    const k = m2[0];
+    return `${k.slice(0,5)}-${k.slice(5,10)}-${k.slice(10,15)}-${k.slice(15,20)}-${k.slice(20,25)}`;
+  }
+  return null;
+}
+
+function setOcrStatus(type, msg) {
+  const el = document.getElementById('ocr-status');
+  el.className = `status-bar ${type}`;
+  el.innerHTML = type === 'success'
+    ? `<div class="dot"></div><span>${msg}</span>`
+    : type === 'error' || type === 'warning'
+      ? `<span>⚠</span><span>${msg}</span>`
+      : `<div class="spinner"></div><span>${msg}</span>`;
+}
+
+// ─── Confirm ──────────────────────────────────────────────
+function showConfirm(key) {
+  showSection('sec-confirm');
+  setStep(3);
+  const input = document.getElementById('key-input');
+  input.value = key;
+  validateKey(key);
+}
+
+function formatKeyInput(el) {
+  let v = el.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  let out = '';
+  for (let i = 0; i < Math.min(v.length, 25); i++) {
+    if (i > 0 && i % 5 === 0) out += '-';
+    out += v[i];
+  }
+  el.value = out;
+  validateKey(out);
+}
+
+function validateKey(key) {
+  const hint = document.getElementById('key-valid-hint');
+  const btn = document.getElementById('btn-gen-qr');
+  const clean = key.replace(/-/g, '');
+  if (clean.length === 25) {
+    hint.textContent = '✓ 格式正確 (25碼)';
+    hint.style.color = 'var(--success)';
+    btn.disabled = false;
+  } else {
+    hint.textContent = `已輸入 ${clean.length}/25 碼`;
+    hint.style.color = clean.length > 0 ? 'var(--warn)' : 'var(--muted)';
+    btn.disabled = clean.length !== 25;
+  }
+}
+
+// ─── QR Code ──────────────────────────────────────────────
+function generateQR() {
+  const key = document.getElementById('key-input').value.trim();
+  currentKey = key;
+
+  showSection('sec-qr');
+  setStep(4);
+
+  document.getElementById('qr-key-text').textContent = key;
+
+  const box = document.getElementById('qr-box');
+  box.innerHTML = '';
+
+  new QRCode(box, {
+    text: key,
+    width: 176,
+    height: 176,
+    colorDark: '#000000',
+    colorLight: '#ffffff',
+    correctLevel: QRCode.CorrectLevel.H
+  });
+}
+
+// ─── Navigation ───────────────────────────────────────────
+function nextDevice() {
+  doneCount++;
+  document.getElementById('done-count').textContent = doneCount;
+  resetAll();
+}
+
+function resetAll() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+
+  document.getElementById('btn-camera').style.display = 'flex';
+  document.getElementById('btn-shoot').style.display = 'none';
+  document.getElementById('stream').style.display = 'none';
+  document.getElementById('preview').style.display = 'none';
+  document.getElementById('file-input').value = '';
+  document.getElementById('key-input').value = '';
+  document.getElementById('qr-box').innerHTML = '';
+  document.getElementById('progress-fill').style.width = '0%';
+
+  showSection('sec-capture');
+  setStep(1);
+}
+
+function showSection(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function setStep(n) {
+  for (let i = 1; i <= 4; i++) {
+    const s = document.getElementById('s' + i);
+    s.classList.remove('active', 'done');
+    if (i < n) s.classList.add('done');
+    else if (i === n) s.classList.add('active');
+  }
+  for (let i = 1; i <= 3; i++) {
+    const l = document.getElementById('l' + i);
+    l.classList.toggle('done', i < n);
+  }
+}
+</script>
+</body>
+</html>
