@@ -6,7 +6,7 @@
 <title>Key Scanner — Windows 序號掃描器</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <style>
   :root {
     --bg: #0a0e1a;
@@ -599,7 +599,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.5</div>
+      <div class="version-badge" id="app-version">V1.6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -649,10 +649,12 @@
     <button class="btn btn-primary" onclick="saveApiKey()" style="background:linear-gradient(135deg,var(--warn),#ff9500); color:#000;">
       💾 儲存並開始使用
     </button>
-    <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:11px; color:var(--muted); font-family:'Share Tech Mono',monospace;">
-      <input type="checkbox" id="gemini-fallback-toggle" onchange="saveGeminiFallbackSetting()" style="width:16px; height:16px; accent-color:var(--warn);">
-      Use Gemini fallback only when local OCR fails
-    </label>
+    <div id="api-usage" style="margin-top:10px; font-size:11px; font-family:'Share Tech Mono',monospace; color:var(--warn); text-align:center;">Today API: 0/20</div>
+    <input type="file" id="api-qr-input" accept="image/*" capture="environment" onchange="handleApiQrFile(event)" style="display:none;">
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px;">
+      <button class="btn btn-secondary" onclick="document.getElementById('api-qr-input').click()" style="margin-top:0;">Scan API QR</button>
+      <button class="btn btn-secondary" onclick="clearApiKey()" style="margin-top:0;">Clear / Change Key</button>
+    </div>
     <div id="apikey-hint" style="margin-top:8px; font-size:10px; font-family:'Share Tech Mono',monospace; color:var(--muted); text-align:center;"></div>
   </div>
 
@@ -765,7 +767,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.5';
+const APP_VERSION = 'V1.6';
 let stream = null;
 let currentKey = '';
 let scanRunId = 0;
@@ -776,10 +778,8 @@ window.addEventListener('DOMContentLoaded', () => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   window.scrollTo(0, 0);
   document.getElementById('app-version').textContent = APP_VERSION;
+  updateApiUsageDisplay();
   const saved = localStorage.getItem('gemini_api_key');
-  const fallbackEnabled = localStorage.getItem('gemini_fallback_enabled') === '1';
-  const fallbackToggle = document.getElementById('gemini-fallback-toggle');
-  if (fallbackToggle) fallbackToggle.checked = fallbackEnabled;
   if (saved) {
     document.getElementById('gemini-key-input').value = saved;
     document.getElementById('apikey-hint').textContent = '✓ 已載入儲存的 Key';
@@ -831,7 +831,7 @@ function saveApiKey() {
     document.getElementById('apikey-hint').textContent = '請輸入 API Key';
     return;
   }
-  localStorage.setItem('gemini_api_key', key);
+  setApiKey(key);
   document.getElementById('apikey-hint').style.color = 'var(--success)';
   document.getElementById('apikey-hint').textContent = '✓ 已儲存！';
   document.getElementById('sec-apikey').style.borderColor = 'rgba(0,255,136,0.3)';
@@ -841,24 +841,104 @@ function getApiKey() {
   return localStorage.getItem('gemini_api_key') || '';
 }
 
-function saveGeminiFallbackSetting() {
-  const enabled = document.getElementById('gemini-fallback-toggle').checked;
-  localStorage.setItem('gemini_fallback_enabled', enabled ? '1' : '0');
-  const hint = document.getElementById('apikey-hint');
-  hint.style.color = enabled ? 'var(--warn)' : 'var(--success)';
-  hint.textContent = enabled ? 'Gemini fallback enabled. API quota may be used.' : 'Local OCR only. Gemini quota will not be used.';
+function setApiKey(key) {
+  const oldKey = getApiKey();
+  if (oldKey && oldKey !== key) {
+    localStorage.setItem('gemini_usage_date', todayString());
+    localStorage.setItem('gemini_usage_count', '0');
+  }
+  localStorage.setItem('gemini_api_key', key);
+  updateApiUsageDisplay();
 }
 
-function shouldUseGeminiFallback() {
-  return localStorage.getItem('gemini_fallback_enabled') === '1';
+function todayString() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function getApiUsage() {
+  const today = todayString();
+  if (localStorage.getItem('gemini_usage_date') !== today) {
+    localStorage.setItem('gemini_usage_date', today);
+    localStorage.setItem('gemini_usage_count', '0');
+  }
+  return Number(localStorage.getItem('gemini_usage_count') || '0');
+}
+
+function incrementApiUsage() {
+  const count = getApiUsage() + 1;
+  localStorage.setItem('gemini_usage_count', String(count));
+  updateApiUsageDisplay();
+  return count;
+}
+
+function updateApiUsageDisplay() {
+  const el = document.getElementById('api-usage');
+  if (!el) return;
+  const count = getApiUsage();
+  el.textContent = `Today API: ${count}/20`;
+  el.style.color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+}
+
+function clearApiKey() {
+  localStorage.removeItem('gemini_api_key');
+  localStorage.setItem('gemini_usage_date', todayString());
+  localStorage.setItem('gemini_usage_count', '0');
+  updateApiUsageDisplay();
+  document.getElementById('gemini-key-input').value = '';
+  const hint = document.getElementById('apikey-hint');
+  hint.style.color = 'var(--warn)';
+  hint.textContent = 'API key cleared. Paste or scan a new key.';
+  document.getElementById('sec-apikey').style.borderColor = 'rgba(255,214,10,0.3)';
+}
+
+function extractApiKey(text) {
+  const match = String(text || '').match(/AIza[0-9A-Za-z_-]{20,}/);
+  return match ? match[0] : String(text || '').trim();
+}
+
+function handleApiQrFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => decodeApiQrImage(ev.target.result);
+  reader.readAsDataURL(file);
+  e.target.value = '';
+}
+
+async function decodeApiQrImage(dataUrl) {
+  const hint = document.getElementById('apikey-hint');
+  try {
+    if (!window.jsQR) throw new Error('QR decoder not loaded.');
+    const img = await dataUrlToImage(dataUrl);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    if (!code?.data) throw new Error('No QR code found.');
+    const key = extractApiKey(code.data);
+    document.getElementById('gemini-key-input').value = key;
+    setApiKey(key);
+    hint.style.color = 'var(--success)';
+    hint.textContent = 'API key scanned and saved.';
+    document.getElementById('sec-apikey').style.borderColor = 'rgba(0,255,136,0.3)';
+  } catch (err) {
+    hint.style.color = 'var(--accent2)';
+    hint.textContent = `API QR failed: ${err.message}`;
+  }
 }
 
 async function processImageV2(dataUrl) {
   const runId = ++scanRunId;
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
-  const useGeminiFallback = shouldUseGeminiFallback();
-  const apiKey = useGeminiFallback ? getApiKey() : '';
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    alert('Please paste or scan Gemini API Key first.');
+    return;
+  }
 
   document.getElementById('captured-img').src = dataUrl;
   document.getElementById('captured-wrap').style.display = 'block';
@@ -878,39 +958,21 @@ async function processImageV2(dataUrl) {
     if (images[0]?.dataUrl) {
       document.getElementById('captured-img').src = images[0].dataUrl;
     }
-    progressEl.style.width = '35%';
-    statusEl.textContent = 'Running local OCR...';
+    progressEl.style.width = '45%';
+    statusEl.textContent = 'Sending to Gemini API...';
 
     let ocrResult;
     let rawText = '';
     let key = '';
     let candidateKey = '';
-    let keyVerified = true;
 
-    try {
-      ocrResult = await readWindowsKeyLocally(images, progressEl, statusEl);
-      if (runId !== scanRunId) return;
-      rawText = ocrResult.text;
-      key = ocrResult.key || '';
-      candidateKey = ocrResult.candidateKey || '';
-      keyVerified = !!key;
-    } catch (localErr) {
-      if (!apiKey) throw localErr;
-      rawText = `Local OCR failed: ${localErr.message}`;
-    }
-
-    if (!key && apiKey) {
-      progressEl.style.width = '65%';
-      statusEl.textContent = 'Local OCR unclear. Trying Gemini fallback...';
-      ocrResult = await readWindowsKeyWithGemini(apiKey, images);
-      if (runId !== scanRunId) return;
-      rawText = ocrResult.text;
-      const result = parseGeminiKeyResult(rawText);
-      key = normalizeProductKey(result.key || rawText);
-      candidateKey = key;
-      keyVerified = !!key;
-      ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
-    }
+    ocrResult = await readWindowsKeyWithGemini(apiKey, images);
+    if (runId !== scanRunId) return;
+    rawText = ocrResult.text;
+    const result = parseGeminiKeyResult(rawText);
+    key = normalizeProductKey(result.key || rawText);
+    candidateKey = key;
+    ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
 
     progressEl.style.width = '100%';
     document.getElementById('ocr-raw').textContent = [
@@ -924,11 +986,8 @@ async function processImageV2(dataUrl) {
     if (key) {
       setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
       showConfirm(key, { verified: true });
-    } else if (candidateKey) {
-      setOcrStatus('warning', 'Local OCR guessed a key. Please verify or edit before QR.');
-      showConfirm(candidateKey, { verified: false });
     } else {
-      setOcrStatus('warning', 'No complete 25-character key found. Please edit manually.');
+      setOcrStatus('warning', 'Gemini did not return a complete key. Please edit manually.');
       showConfirm('', { verified: true });
     }
   } catch (err) {
@@ -965,48 +1024,34 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     parts.push({ inline_data: { mime_type: img.mimeType, data: img.base64 } });
   });
 
-  const models = [
-    'gemini-2.0-flash-lite',
-    'gemini-2.5-flash-lite',
-    'gemini-2.0-flash'
-  ];
-  const errors = [];
-
-  for (const model of models) {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: {
-            temperature: 0,
-            maxOutputTokens: 160,
-            responseMimeType: 'application/json'
-          }
-        })
-      }
-    );
-
-    if (res.ok) {
-      const data = await res.json();
-      return {
-        model,
-        text: data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim() || ''
-      };
+  const model = 'gemini-2.5-flash-lite';
+  incrementApiUsage();
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 120,
+          responseMimeType: 'application/json'
+        }
+      })
     }
+  );
 
+  if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    const message = err.error?.message || `HTTP ${res.status}`;
-    errors.push(`${model}: ${message}`);
-
-    if (!isQuotaError(res.status, message)) {
-      throw new Error(message);
-    }
+    throw new Error(err.error?.message || `HTTP ${res.status}`);
   }
 
-  throw new Error(`All Gemini models are out of quota or unavailable:\n${errors.join('\n')}`);
+  const data = await res.json();
+  return {
+    model,
+    text: data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim() || ''
+  };
 }
 
 function isQuotaError(status, message) {
