@@ -613,7 +613,7 @@
   </div>
 
   <!-- 完成計數 -->
-  <div style="text-align:center;">
+  <div style="text-align:center; display:none;">
     <div class="counter-badge">
       <span>已完成</span>
       <span class="counter-num" id="done-count">0</span>
@@ -634,6 +634,10 @@
     <button class="btn btn-primary" onclick="saveApiKey()" style="background:linear-gradient(135deg,var(--warn),#ff9500); color:#000;">
       💾 儲存並開始使用
     </button>
+    <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:11px; color:var(--muted); font-family:'Share Tech Mono',monospace;">
+      <input type="checkbox" id="gemini-fallback-toggle" onchange="saveGeminiFallbackSetting()" style="width:16px; height:16px; accent-color:var(--warn);">
+      Use Gemini fallback only when local OCR fails
+    </label>
     <div id="apikey-hint" style="margin-top:8px; font-size:10px; font-family:'Share Tech Mono',monospace; color:var(--muted); text-align:center;"></div>
   </div>
 
@@ -747,13 +751,17 @@ XXXXX"
 
 <script>
 let stream = null;
-let doneCount = 0;
 let currentKey = '';
 let scanRunId = 0;
 
 // Load saved API key on startup
 window.addEventListener('DOMContentLoaded', () => {
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  window.scrollTo(0, 0);
   const saved = localStorage.getItem('gemini_api_key');
+  const fallbackEnabled = localStorage.getItem('gemini_fallback_enabled') === '1';
+  const fallbackToggle = document.getElementById('gemini-fallback-toggle');
+  if (fallbackToggle) fallbackToggle.checked = fallbackEnabled;
   if (saved) {
     document.getElementById('gemini-key-input').value = saved;
     document.getElementById('apikey-hint').textContent = '✓ 已載入儲存的 Key';
@@ -815,11 +823,24 @@ function getApiKey() {
   return localStorage.getItem('gemini_api_key') || '';
 }
 
+function saveGeminiFallbackSetting() {
+  const enabled = document.getElementById('gemini-fallback-toggle').checked;
+  localStorage.setItem('gemini_fallback_enabled', enabled ? '1' : '0');
+  const hint = document.getElementById('apikey-hint');
+  hint.style.color = enabled ? 'var(--warn)' : 'var(--success)';
+  hint.textContent = enabled ? 'Gemini fallback enabled. API quota may be used.' : 'Local OCR only. Gemini quota will not be used.';
+}
+
+function shouldUseGeminiFallback() {
+  return localStorage.getItem('gemini_fallback_enabled') === '1';
+}
+
 async function processImageV2(dataUrl) {
   const runId = ++scanRunId;
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
-  const apiKey = getApiKey();
+  const useGeminiFallback = shouldUseGeminiFallback();
+  const apiKey = useGeminiFallback ? getApiKey() : '';
 
   document.getElementById('captured-img').src = dataUrl;
   document.getElementById('captured-wrap').style.display = 'block';
@@ -830,6 +851,7 @@ async function processImageV2(dataUrl) {
   const progressEl = document.getElementById('progress-fill');
 
   statusEl.textContent = 'Preparing image crops...';
+  setOcrStatus('processing', 'Preparing image crops...');
   progressEl.style.width = '20%';
 
   try {
@@ -1357,9 +1379,9 @@ function generateQR() {
 
 // ─── Navigation ───────────────────────────────────────────
 function nextDevice() {
-  doneCount++;
-  document.getElementById('done-count').textContent = doneCount;
-  resetAll();
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  scanRunId++;
+  window.location.reload();
 }
 
 function resetAll() {
