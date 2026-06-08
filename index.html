@@ -86,6 +86,20 @@
     -webkit-text-fill-color: transparent;
   }
 
+  .version-badge {
+    min-width: 58px;
+    padding: 5px 8px;
+    border: 1px solid rgba(0,212,255,0.45);
+    border-radius: 6px;
+    color: var(--accent);
+    background: rgba(0,212,255,0.08);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-align: center;
+    box-shadow: 0 0 12px rgba(0,212,255,0.12);
+  }
+
   .subtitle {
     font-size: 11px;
     color: var(--muted);
@@ -585,6 +599,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
+      <div class="version-badge" id="app-version">V1.2</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -750,6 +765,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
+const APP_VERSION = 'V1.2';
 let stream = null;
 let currentKey = '';
 let scanRunId = 0;
@@ -758,6 +774,7 @@ let scanRunId = 0;
 window.addEventListener('DOMContentLoaded', () => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   window.scrollTo(0, 0);
+  document.getElementById('app-version').textContent = APP_VERSION;
   const saved = localStorage.getItem('gemini_api_key');
   const fallbackEnabled = localStorage.getItem('gemini_fallback_enabled') === '1';
   const fallbackToggle = document.getElementById('gemini-fallback-toggle');
@@ -985,23 +1002,31 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
   const localOcr = window.Tesseract;
 
   const texts = [];
-  for (let i = 0; i < images.length; i++) {
-    const img = images[i];
-    statusEl.textContent = `Running local OCR (${i + 1}/${images.length})...`;
-    const baseProgress = 35 + Math.round((i / images.length) * 25);
+  const modes = [
+    { label: 'block', psm: '6' },
+    { label: 'line', psm: '7' },
+    { label: 'sparse', psm: '11' }
+  ];
+  const attempts = images.flatMap(img => modes.map(mode => ({ img, mode })));
+
+  for (let i = 0; i < attempts.length; i++) {
+    const { img, mode } = attempts[i];
+    statusEl.textContent = `Running local OCR (${i + 1}/${attempts.length})...`;
+    const baseProgress = 35 + Math.round((i / attempts.length) * 25);
 
     const result = await localOcr.recognize(img.dataUrl, 'eng', {
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ',
       preserve_interword_spaces: '1',
+      tessedit_pageseg_mode: mode.psm,
       logger: m => {
         if (m.status === 'recognizing text' && typeof m.progress === 'number') {
-          progressEl.style.width = `${baseProgress + Math.round(m.progress * 20)}%`;
+          progressEl.style.width = `${baseProgress + Math.round(m.progress * 18)}%`;
         }
       }
     });
 
     const text = cleanupOcrText(result.data?.text || '');
-    texts.push(`--- ${img.label} ---\n${text}`);
+    texts.push(`--- ${img.label} / ${mode.label} ---\n${text}`);
 
     const key = normalizeProductKey(text);
     if (key) {
@@ -1040,10 +1065,27 @@ function normalizeProductKey(value) {
   if (!value || /NOT[_\s-]?FOUND/i.test(value)) return '';
   const upper = String(value).toUpperCase();
   const direct = upper.match(/[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}/);
-  if (!direct) return '';
-  const compact = direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25);
+  const compact = direct
+    ? direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25)
+    : findLooseProductKey(upper);
   if (compact.length !== 25) return '';
   return compact.match(/.{1,5}/g).join('-');
+}
+
+function findLooseProductKey(text) {
+  const chunks = String(text || '').match(/[A-Z0-9]{2,}/g) || [];
+  const ignored = new Set(['WINDOWS', 'MICROSOFT', 'SOFTWARE', 'HOWTOTELL', 'ENTRY', 'LABEL', 'SOLD', 'SEPARATELY']);
+  const useful = chunks.filter(chunk => !ignored.has(chunk) && !/^\d{6,}$/.test(chunk));
+  for (let i = 0; i < useful.length; i++) {
+    let joined = '';
+    for (let j = i; j < useful.length && joined.length < 30; j++) {
+      joined += useful[j];
+      if (joined.length === 25) return joined;
+    }
+  }
+  const all = useful.join('');
+  const match = all.match(/[A-Z0-9]{25}/);
+  return match ? match[0] : '';
 }
 
 function dataUrlToImage(dataUrl) {
@@ -1097,6 +1139,14 @@ async function prepareKeyImages(dataUrl) {
         h: Math.max(marker.h * 8, h * 0.16)
       }, w, h)
     : { x: w * 0.34, y: h * 0.48, w: w * 0.50, h: h * 0.20 };
+  const tightKeyBand = marker
+    ? clampRect({
+        x: marker.x + marker.w * 1.4,
+        y: marker.y - marker.h * 1.4,
+        w: Math.min(w * 0.50, w - marker.x - marker.w * 1.4),
+        h: Math.max(marker.h * 6.5, h * 0.13)
+      }, w, h)
+    : { x: w * 0.39, y: h * 0.50, w: w * 0.44, h: h * 0.16 };
   const rightKeyBand = marker
     ? clampRect({
         x: marker.x + marker.w,
@@ -1105,10 +1155,11 @@ async function prepareKeyImages(dataUrl) {
         h: Math.max(marker.h * 10, h * 0.22)
       }, w, h)
     : { x: w * 0.40, y: h * 0.38, w: w * 0.52, h: h * 0.34 };
-  addVariant(marker ? 'detected key symbol - inverted' : 'from key symbol - inverted', keyStartBand, 'invert');
   addVariant(marker ? 'detected key symbol - black text' : 'from key symbol - black text', keyStartBand, 'threshold');
-  addVariant('key only - inverted', keyOnlyBand, 'invert');
-  addVariant('right key area - inverted', rightKeyBand, 'invert');
+  addVariant('tight key text - black text', tightKeyBand, 'threshold');
+  addVariant('key only - black text', keyOnlyBand, 'threshold');
+  addVariant(marker ? 'detected key symbol - inverted' : 'from key symbol - inverted', keyStartBand, 'invert');
+  addVariant('right key area - black text', rightKeyBand, 'threshold');
   addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
   return variants;
 }
