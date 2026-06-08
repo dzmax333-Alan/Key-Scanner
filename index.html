@@ -6,6 +6,7 @@
 <title>Key Scanner — Windows 序號掃描器</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   :root {
     --bg: #0a0e1a;
@@ -809,10 +810,6 @@ async function processImageV2(dataUrl) {
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   const apiKey = getApiKey();
-  if (!apiKey) {
-    alert('Please enter Gemini API Key first.');
-    return;
-  }
 
   document.getElementById('captured-img').src = dataUrl;
   document.getElementById('captured-wrap').style.display = 'block';
@@ -827,22 +824,44 @@ async function processImageV2(dataUrl) {
 
   try {
     const images = await prepareKeyImages(dataUrl);
-    progressEl.style.width = '45%';
-    statusEl.textContent = 'Sending to Gemini OCR...';
+    if (images[0]?.dataUrl) {
+      document.getElementById('captured-img').src = images[0].dataUrl;
+    }
+    progressEl.style.width = '35%';
+    statusEl.textContent = 'Running local OCR...';
 
-    const rawText = await readWindowsKeyWithGemini(apiKey, images);
-    const result = parseGeminiKeyResult(rawText);
-    const key = normalizeProductKey(result.key || rawText);
+    let ocrResult;
+    let rawText = '';
+    let key = '';
+
+    try {
+      ocrResult = await readWindowsKeyLocally(images, progressEl, statusEl);
+      rawText = ocrResult.text;
+      key = normalizeProductKey(rawText);
+    } catch (localErr) {
+      if (!apiKey) throw localErr;
+      rawText = `Local OCR failed: ${localErr.message}`;
+    }
+
+    if (!key && apiKey) {
+      progressEl.style.width = '65%';
+      statusEl.textContent = 'Local OCR unclear. Trying Gemini fallback...';
+      ocrResult = await readWindowsKeyWithGemini(apiKey, images);
+      rawText = ocrResult.text;
+      const result = parseGeminiKeyResult(rawText);
+      key = normalizeProductKey(result.key || rawText);
+    }
 
     progressEl.style.width = '100%';
     document.getElementById('ocr-raw').textContent = [
       rawText,
       '',
+      `OCR: ${ocrResult.model}`,
       key ? `Detected: ${key}` : 'Detected: NOT_FOUND'
     ].join('\n');
 
     if (key) {
-      setOcrStatus('success', 'Gemini found a possible product key.');
+      setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
       setTimeout(() => showConfirm(key), 500);
     } else {
       setOcrStatus('warning', 'No complete 25-character key found. Please edit manually.');
@@ -875,29 +894,101 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     parts.push({ inline_data: { mime_type: img.mimeType, data: img.base64 } });
   });
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0,
-          maxOutputTokens: 160,
-          responseMimeType: 'application/json'
-        }
-      })
-    }
-  );
+  const models = [
+    'gemini-2.0-flash-lite',
+    'gemini-2.5-flash-lite',
+    'gemini-2.0-flash'
+  ];
+  const errors = [];
 
-  if (!res.ok) {
+  for (const model of models) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 160,
+            responseMimeType: 'application/json'
+          }
+        })
+      }
+    );
+
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        model,
+        text: data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim() || ''
+      };
+    }
+
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `HTTP ${res.status}`);
+    const message = err.error?.message || `HTTP ${res.status}`;
+    errors.push(`${model}: ${message}`);
+
+    if (!isQuotaError(res.status, message)) {
+      throw new Error(message);
+    }
   }
 
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim() || '';
+  throw new Error(`All Gemini models are out of quota or unavailable:\n${errors.join('\n')}`);
+}
+
+function isQuotaError(status, message) {
+  return status === 429 || /quota|RESOURCE_EXHAUSTED|rate limit/i.test(message);
+}
+
+async function readWindowsKeyLocally(images, progressEl, statusEl) {
+  if (!window.Tesseract) {
+    throw new Error('Local OCR engine did not load. Please check internet connection for Tesseract.js.');
+  }
+  const localOcr = window.Tesseract;
+
+  const texts = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    statusEl.textContent = `Running local OCR (${i + 1}/${images.length})...`;
+    const baseProgress = 35 + Math.round((i / images.length) * 25);
+
+    const result = await localOcr.recognize(img.dataUrl, 'eng', {
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- ',
+      preserve_interword_spaces: '1',
+      logger: m => {
+        if (m.status === 'recognizing text' && typeof m.progress === 'number') {
+          progressEl.style.width = `${baseProgress + Math.round(m.progress * 20)}%`;
+        }
+      }
+    });
+
+    const text = cleanupOcrText(result.data?.text || '');
+    texts.push(`--- ${img.label} ---\n${text}`);
+
+    const key = normalizeProductKey(text);
+    if (key) {
+      return {
+        model: 'Local OCR',
+        text: `${texts.join('\n\n')}\n\n${key}`
+      };
+    }
+  }
+
+  return {
+    model: 'Local OCR',
+    text: texts.join('\n\n')
+  };
+}
+
+function cleanupOcrText(text) {
+  return String(text || '')
+    .toUpperCase()
+    .replace(/[^\w\-\s]/g, ' ')
+    .replace(/\bWINDOWS\b|\bMICROSOFT\b|\bSOFTWARE\b|\bHOWTOTELL\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function parseGeminiKeyResult(text) {
@@ -931,19 +1022,21 @@ function dataUrlToImage(dataUrl) {
 async function prepareKeyImages(dataUrl) {
   const img = await dataUrlToImage(dataUrl);
   const variants = [];
-  const addVariant = (label, rect, enhance = false) => {
+  const addVariant = (label, rect, mode = 'normal') => {
     const canvas = document.createElement('canvas');
-    const scale = enhance ? 2.2 : 1.4;
+    const enhance = mode !== 'normal';
+    const scale = enhance ? 2.6 : 1.4;
     canvas.width = Math.round(rect.w * scale);
     canvas.height = Math.round(rect.h * scale);
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
-    if (enhance) enhanceForOcr(ctx, canvas.width, canvas.height);
+    if (enhance) enhanceForOcr(ctx, canvas.width, canvas.height, mode);
     const url = canvas.toDataURL('image/jpeg', 0.92);
     variants.push({
       label,
+      dataUrl: url,
       mimeType: 'image/jpeg',
       base64: url.split(',')[1]
     });
@@ -951,20 +1044,131 @@ async function prepareKeyImages(dataUrl) {
 
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
-  addVariant('full label', { x: 0, y: 0, w, h });
-  addVariant('center and right sticker area', { x: w * 0.28, y: h * 0.35, w: w * 0.70, h: h * 0.45 }, true);
-  addVariant('lower key text band', { x: w * 0.34, y: h * 0.48, w: w * 0.58, h: h * 0.25 }, true);
-  addVariant('right half including checkbox and key', { x: w * 0.40, y: h * 0.38, w: w * 0.56, h: h * 0.36 }, true);
+  const marker = findKeySymbolMarker(img, w, h);
+  const keyStartBand = marker
+    ? clampRect({
+        x: marker.x - w * 0.01,
+        y: marker.y - marker.h * 2.2,
+        w: Math.min(w * 0.66, w - marker.x),
+        h: Math.max(marker.h * 9, h * 0.18)
+      }, w, h)
+    : { x: w * 0.25, y: h * 0.43, w: w * 0.62, h: h * 0.24 };
+  const keyOnlyBand = marker
+    ? clampRect({
+        x: marker.x + marker.w * 0.75,
+        y: marker.y - marker.h * 1.8,
+        w: Math.min(w * 0.58, w - marker.x - marker.w * 0.75),
+        h: Math.max(marker.h * 8, h * 0.16)
+      }, w, h)
+    : { x: w * 0.34, y: h * 0.48, w: w * 0.50, h: h * 0.20 };
+  const rightKeyBand = marker
+    ? clampRect({
+        x: marker.x + marker.w,
+        y: marker.y - marker.h * 2.5,
+        w: Math.min(w * 0.56, w - marker.x - marker.w),
+        h: Math.max(marker.h * 10, h * 0.22)
+      }, w, h)
+    : { x: w * 0.40, y: h * 0.38, w: w * 0.52, h: h * 0.34 };
+  addVariant(marker ? 'detected key symbol - inverted' : 'from key symbol - inverted', keyStartBand, 'invert');
+  addVariant(marker ? 'detected key symbol - black text' : 'from key symbol - black text', keyStartBand, 'threshold');
+  addVariant('key only - inverted', keyOnlyBand, 'invert');
+  addVariant('right key area - inverted', rightKeyBand, 'invert');
+  addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
   return variants;
 }
 
-function enhanceForOcr(ctx, width, height) {
+function clampRect(rect, maxW, maxH) {
+  const x = Math.max(0, Math.min(maxW - 1, rect.x));
+  const y = Math.max(0, Math.min(maxH - 1, rect.y));
+  const w = Math.max(1, Math.min(maxW - x, rect.w));
+  const h = Math.max(1, Math.min(maxH - y, rect.h));
+  return { x, y, w, h };
+}
+
+function findKeySymbolMarker(img, w, h) {
+  const search = {
+    x: Math.floor(w * 0.16),
+    y: Math.floor(h * 0.34),
+    w: Math.floor(w * 0.30),
+    h: Math.floor(h * 0.24)
+  };
+  const sample = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.floor(search.w / sample));
+  canvas.height = Math.max(1, Math.floor(search.h / sample));
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, search.x, search.y, search.w, search.h, 0, 0, canvas.width, canvas.height);
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const cols = new Array(canvas.width).fill(0);
+  const rows = new Array(canvas.height).fill(0);
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const dark = r < 95 && g < 95 && b < 95 && Math.max(r, g, b) - Math.min(r, g, b) < 55;
+      if (dark) {
+        cols[x]++;
+        rows[y]++;
+      }
+    }
+  }
+
+  const colLimit = Math.max(2, canvas.height * 0.035);
+  const rowLimit = Math.max(2, canvas.width * 0.030);
+  const xRange = findDenseRange(cols, colLimit, 3);
+  const yRange = findDenseRange(rows, rowLimit, 2);
+  if (!xRange || !yRange) return null;
+
+  const box = {
+    x: search.x + xRange.start * sample,
+    y: search.y + yRange.start * sample,
+    w: Math.max(1, (xRange.end - xRange.start + 1) * sample),
+    h: Math.max(1, (yRange.end - yRange.start + 1) * sample)
+  };
+  const ratio = box.w / box.h;
+  if (box.w < w * 0.035 || box.w > w * 0.18 || box.h < h * 0.008 || box.h > h * 0.08) return null;
+  if (ratio < 2.0 || ratio > 9.0) return null;
+  return box;
+}
+
+function findDenseRange(values, threshold, gapLimit) {
+  let best = null;
+  let start = -1;
+  let end = -1;
+  let gap = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] >= threshold) {
+      if (start < 0) start = i;
+      end = i;
+      gap = 0;
+    } else if (start >= 0) {
+      gap++;
+      if (gap > gapLimit) {
+        const candidate = { start, end };
+        if (!best || candidate.end - candidate.start > best.end - best.start) best = candidate;
+        start = -1;
+        end = -1;
+        gap = 0;
+      }
+    }
+  }
+  if (start >= 0) {
+    const candidate = { start, end };
+    if (!best || candidate.end - candidate.start > best.end - best.start) best = candidate;
+  }
+  return best && best.end >= best.start ? best : null;
+}
+
+function enhanceForOcr(ctx, width, height, mode = 'threshold') {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
   for (let i = 0; i < data.length; i += 4) {
     const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    const contrast = Math.max(0, Math.min(255, (gray - 128) * 1.8 + 128));
-    data[i] = data[i + 1] = data[i + 2] = contrast < 150 ? 0 : 255;
+    const contrast = Math.max(0, Math.min(255, (gray - 128) * 2.1 + 128));
+    const bw = contrast < 165 ? 0 : 255;
+    const value = mode === 'invert' ? 255 - bw : bw;
+    data[i] = data[i + 1] = data[i + 2] = value;
   }
   ctx.putImageData(imageData, 0, 0);
 }
