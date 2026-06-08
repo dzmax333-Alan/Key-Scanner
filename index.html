@@ -599,7 +599,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.3</div>
+      <div class="version-badge" id="app-version">V1.5</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -765,10 +765,11 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.3';
+const APP_VERSION = 'V1.5';
 let stream = null;
 let currentKey = '';
 let scanRunId = 0;
+let keyInputVerified = true;
 
 // Load saved API key on startup
 window.addEventListener('DOMContentLoaded', () => {
@@ -883,12 +884,16 @@ async function processImageV2(dataUrl) {
     let ocrResult;
     let rawText = '';
     let key = '';
+    let candidateKey = '';
+    let keyVerified = true;
 
     try {
       ocrResult = await readWindowsKeyLocally(images, progressEl, statusEl);
       if (runId !== scanRunId) return;
       rawText = ocrResult.text;
       key = ocrResult.key || '';
+      candidateKey = ocrResult.candidateKey || '';
+      keyVerified = !!key;
     } catch (localErr) {
       if (!apiKey) throw localErr;
       rawText = `Local OCR failed: ${localErr.message}`;
@@ -902,6 +907,9 @@ async function processImageV2(dataUrl) {
       rawText = ocrResult.text;
       const result = parseGeminiKeyResult(rawText);
       key = normalizeProductKey(result.key || rawText);
+      candidateKey = key;
+      keyVerified = !!key;
+      ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
     }
 
     progressEl.style.width = '100%';
@@ -910,15 +918,18 @@ async function processImageV2(dataUrl) {
       '',
       `OCR: ${ocrResult.model}`,
       ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
-      key ? `Detected: ${key}` : 'Detected: NOT_FOUND'
+      key ? `Detected: ${key}` : (candidateKey ? `Candidate: ${candidateKey}` : 'Detected: NOT_FOUND')
     ].filter(Boolean).join('\n');
 
     if (key) {
       setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
-      showConfirm(key);
+      showConfirm(key, { verified: true });
+    } else if (candidateKey) {
+      setOcrStatus('warning', 'Local OCR guessed a key. Please verify or edit before QR.');
+      showConfirm(candidateKey, { verified: false });
     } else {
       setOcrStatus('warning', 'No complete 25-character key found. Please edit manually.');
-      showConfirm('');
+      showConfirm('', { verified: true });
     }
   } catch (err) {
     if (runId !== scanRunId) return;
@@ -938,12 +949,18 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Return strict JSON only:',
     '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
     'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
+    'Never return the placeholder XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.',
+    'Do not use OCR guesses from other image variants as evidence; read the photo directly.',
     'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2. Do not invent missing characters.',
     'Example from this label style: YH9MB-GTNPG-CJG29-RQJ4R-MWV23'
   ].join('\n');
 
   const parts = [{ text: prompt }];
-  images.forEach(img => {
+  const apiImages = images.filter(img =>
+    img.label === 'full label reference' ||
+    /key symbol - black text|tight key text/.test(img.label)
+  ).slice(0, 3);
+  apiImages.forEach(img => {
     parts.push({ text: `Image variant: ${img.label}` });
     parts.push({ inline_data: { mime_type: img.mimeType, data: img.base64 } });
   });
@@ -1009,6 +1026,8 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
     { label: 'sparse', psm: '11' }
   ];
   const attempts = images.flatMap(img => modes.map(mode => ({ img, mode })));
+  let bestCandidate = '';
+  let bestConfidence = 0;
 
   for (let i = 0; i < attempts.length; i++) {
     const { img, mode } = attempts[i];
@@ -1030,6 +1049,10 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
     const text = cleanupOcrText(result.data?.text || '');
     const key = normalizeProductKey(text, { loose: false });
     const looseKey = normalizeProductKey(text, { loose: true });
+    if (looseKey && confidence >= bestConfidence) {
+      bestCandidate = looseKey;
+      bestConfidence = confidence;
+    }
     texts.push(`--- ${img.label} / ${mode.label} / ${Math.round(confidence)}% ---\n${text}${looseKey ? `\nCandidate: ${looseKey}` : ''}`);
 
     if (key && isReliableLocalKey(key, confidence, text)) {
@@ -1044,8 +1067,9 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
 
   return {
     model: 'Local OCR',
-    confidence: 0,
+    confidence: bestConfidence,
     key: '',
+    candidateKey: bestCandidate,
     text: texts.join('\n\n')
   };
 }
@@ -1074,7 +1098,20 @@ function normalizeProductKey(value, options = {}) {
   const direct = upper.match(/[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}/);
   const compact = direct ? direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25) : (options.loose ? findLooseProductKey(upper) : '');
   if (compact.length !== 25) return '';
+  if (isPlaceholderKey(compact)) return '';
   return compact.match(/.{1,5}/g).join('-');
+}
+
+function isPlaceholderKey(compactKey) {
+  const compact = String(compactKey || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  if (!compact || compact.length !== 25) return true;
+  if (/X{5}/.test(compact)) return true;
+  const groups = compact.match(/.{1,5}/g) || [];
+  const uniqueGroups = new Set(groups);
+  if (uniqueGroups.size <= 2) return true;
+  const uniqueChars = new Set(compact);
+  if (uniqueChars.size < 8) return true;
+  return false;
 }
 
 function isReliableLocalKey(key, confidence, text) {
@@ -1368,9 +1405,10 @@ function setOcrStatus(type, msg) {
 }
 
 // ─── Confirm ──────────────────────────────────────────────
-function showConfirm(key) {
+function showConfirm(key, options = {}) {
   showSection('sec-confirm');
   setStep(3);
+  keyInputVerified = options.verified !== false;
   const input = document.getElementById('key-input');
   input.value = formatKeyForDisplay(key);
   validateKey(input.value);
@@ -1378,6 +1416,7 @@ function showConfirm(key) {
 }
 
 function formatKeyInput(el) {
+  keyInputVerified = true;
   let v = el.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
   const out = formatKeyForDisplay(v);
   el.value = out;
@@ -1417,6 +1456,27 @@ function validateKey(key) {
 }
 
 // ─── QR Code ──────────────────────────────────────────────
+validateKey = function(key) {
+  const hint = document.getElementById('key-valid-hint');
+  const btn = document.getElementById('btn-gen-qr');
+  const clean = key.replace(/[^A-Za-z0-9]/g, '');
+  if (clean.length === 25) {
+    if (keyInputVerified) {
+      hint.textContent = '格式正確 (25碼)';
+      hint.style.color = 'var(--success)';
+      btn.disabled = false;
+    } else {
+      hint.textContent = 'OCR 候選碼，請核對後修改任一字再產生 QR';
+      hint.style.color = 'var(--warn)';
+      btn.disabled = true;
+    }
+  } else {
+    hint.textContent = `已輸入 ${clean.length}/25 碼`;
+    hint.style.color = clean.length > 0 ? 'var(--warn)' : 'var(--muted)';
+    btn.disabled = clean.length !== 25;
+  }
+};
+
 function generateQR() {
   const key = getNormalizedKeyFromInput();
   currentKey = key;
