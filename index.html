@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Key Scanner — Windows 序號掃描器</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600;800&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <style>
   :root {
@@ -616,6 +615,22 @@
     </div>
   </div>
 
+  <!-- API Key 設定 -->
+  <div class="panel" id="sec-apikey" style="border-color: rgba(255,214,10,0.3);">
+    <div class="panel-title" style="color:var(--warn);">Gemini API Key 設定</div>
+    <div style="font-size:11px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:10px; line-height:1.6;">
+      前往 <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);">aistudio.google.com</a> 免費取得 API Key
+    </div>
+    <input type="password" id="gemini-key-input"
+      placeholder="貼上你的 Gemini API Key..."
+      style="width:100%; background:rgba(0,0,0,0.4); border:1px solid var(--border); border-radius:10px; padding:12px 14px; font-family:'Share Tech Mono',monospace; font-size:13px; color:var(--warn); outline:none; margin-bottom:10px;"
+    >
+    <button class="btn btn-primary" onclick="saveApiKey()" style="background:linear-gradient(135deg,var(--warn),#ff9500); color:#000;">
+      💾 儲存並開始使用
+    </button>
+    <div id="apikey-hint" style="margin-top:8px; font-size:10px; font-family:'Share Tech Mono',monospace; color:var(--muted); text-align:center;"></div>
+  </div>
+
   <!-- STEP 1: 拍照 -->
   <div class="panel section active" id="sec-capture">
     <div class="panel-title">步驟 01 — 拍攝貼紙</div>
@@ -726,6 +741,17 @@ let stream = null;
 let doneCount = 0;
 let currentKey = '';
 
+// Load saved API key on startup
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('gemini_api_key');
+  if (saved) {
+    document.getElementById('gemini-key-input').value = saved;
+    document.getElementById('apikey-hint').textContent = '✓ 已載入儲存的 Key';
+    document.getElementById('apikey-hint').style.color = 'var(--success)';
+    document.getElementById('sec-apikey').style.borderColor = 'rgba(0,255,136,0.3)';
+  }
+});
+
 // ─── Camera ───────────────────────────────────────────────
 async function startCamera() {
   try {
@@ -762,170 +788,106 @@ function handleFile(e) {
   reader.readAsDataURL(file);
 }
 
-// ─── Image Preprocessing ──────────────────────────────────
-function preprocessImage(dataUrl) {
-  return new Promise(resolve => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      // Scale up for better OCR
-      const scale = Math.max(1, Math.min(3, 1800 / img.width));
-      canvas.width  = img.width  * scale;
-      canvas.height = img.height * scale;
-      const ctx = canvas.getContext('2d');
-
-      // Draw original
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-      // Get pixel data
-      const idata = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const d = idata.data;
-
-      for (let i = 0; i < d.length; i += 4) {
-        // Convert to grayscale (luminance)
-        const gray = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-
-        // High contrast: boost dark pixels (text), suppress mid-tones (background pattern)
-        // The COA sticker has dark text on colorful background
-        // Aggressive threshold: <100 = black text, >100 = white background
-        const val = gray < 110 ? 0 : 255;
-
-        d[i] = d[i+1] = d[i+2] = val;
-        d[i+3] = 255;
-      }
-
-      ctx.putImageData(idata, 0, 0);
-      resolve(canvas.toDataURL('image/png'));
-    };
-    img.src = dataUrl;
-  });
+// ─── API Key 管理 ─────────────────────────────────────────
+function saveApiKey() {
+  const key = document.getElementById('gemini-key-input').value.trim();
+  if (!key) {
+    document.getElementById('apikey-hint').textContent = '請輸入 API Key';
+    return;
+  }
+  localStorage.setItem('gemini_api_key', key);
+  document.getElementById('apikey-hint').style.color = 'var(--success)';
+  document.getElementById('apikey-hint').textContent = '✓ 已儲存！';
+  document.getElementById('sec-apikey').style.borderColor = 'rgba(0,255,136,0.3)';
 }
 
-// ─── OCR ──────────────────────────────────────────────────
+function getApiKey() {
+  return localStorage.getItem('gemini_api_key') || '';
+}
+
+// ─── Gemini Vision OCR ────────────────────────────────────
 async function processImage(dataUrl) {
-  // Stop camera
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
-  // Show captured image
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    alert('請先輸入 Gemini API Key！');
+    return;
+  }
+
   document.getElementById('captured-img').src = dataUrl;
   document.getElementById('captured-wrap').style.display = 'block';
-
-  // Switch to OCR section
   showSection('sec-ocr');
   setStep(2);
 
   const statusEl = document.getElementById('ocr-status-text');
   const progressEl = document.getElementById('progress-fill');
 
-  // Step 1: preprocess
-  statusEl.textContent = '圖像前處理中（強化對比）...';
-  progressEl.style.width = '5%';
-  const processed = await preprocessImage(dataUrl);
+  statusEl.textContent = '傳送圖片給 Gemini AI...';
+  progressEl.style.width = '30%';
 
-  // Show preprocessed preview too
-  document.getElementById('captured-img').src = processed;
+  // Convert dataUrl to base64
+  const base64 = dataUrl.split(',')[1];
+  const mimeType = dataUrl.split(';')[0].split(':')[1];
 
-  // Step 2: OCR with best config for product keys
-  const config = {
-    logger: m => {
-      if (m.status === 'recognizing text') {
-        const pct = Math.round(m.progress * 90) + 10;
-        progressEl.style.width = pct + '%';
-        statusEl.textContent = `辨識中... ${pct}%`;
-      }
-    },
-    // Tesseract params: single block, alphanumeric only
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-· ',
-    tessedit_pageseg_mode: '6', // Assume uniform block of text
-  };
+  const prompt = `這是一張 Windows COA 授權貼紙的照片。
+請找出貼紙上的 Windows Product Key（序號）。
+序號格式是 25 個英數字，通常以鑰匙圖示（🔑 或 ⚿）標示，分成 5 組每組 5 碼，用 · 或 - 分隔。
+例如：YH9MB-GTNPG-CJG29-RQJ4R-MWV23
+
+請只回傳序號本身，格式為 XXXXX-XXXXX-XXXXX-XXXXX-XXXXX，不要其他文字。
+如果找不到序號，回傳 NOT_FOUND。`;
 
   try {
-    const { data: { text } } = await Tesseract.recognize(processed, 'eng', config);
+    progressEl.style.width = '60%';
+    statusEl.textContent = 'Gemini 辨識中...';
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64 } },
+              { text: prompt }
+            ]
+          }],
+          generationConfig: { temperature: 0, maxOutputTokens: 64 }
+        })
+      }
+    );
+
+    progressEl.style.width = '90%';
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error?.message || res.status);
+    }
+
+    const data = await res.json();
+    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
     progressEl.style.width = '100%';
 
-    // Show raw OCR result for debugging
-    const rawDiv = document.getElementById('ocr-raw');
-    if (rawDiv) rawDiv.textContent = text.trim();
+    document.getElementById('ocr-raw').textContent = rawText;
 
-    const key = extractProductKey(text);
-    if (key) {
-      setOcrStatus('success', '✓ 辨識成功！');
+    if (rawText && rawText !== 'NOT_FOUND') {
+      // Clean up response - extract key pattern
+      const match = rawText.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
+      const key = match ? match[0] : rawText.replace(/[^A-Z0-9\-]/g, '').slice(0, 29);
+      setOcrStatus('success', '✓ Gemini 辨識成功！');
       setTimeout(() => showConfirm(key), 500);
     } else {
-      setOcrStatus('warning', '⚠ 未完整辨識，請核對或手動修正');
-      // Try to pre-fill partial result
-      const partial = extractPartial(text);
-      setTimeout(() => showConfirm(partial), 600);
+      setOcrStatus('warning', '⚠ 未找到序號，請手動輸入');
+      setTimeout(() => showConfirm(''), 600);
     }
   } catch (err) {
-    setOcrStatus('error', '✗ 辨識失敗，請手動輸入');
-    setTimeout(() => showConfirm(''), 600);
+    progressEl.style.width = '100%';
+    setOcrStatus('error', `✗ 錯誤：${err.message}`);
+    document.getElementById('ocr-raw').textContent = err.message;
+    setTimeout(() => showConfirm(''), 800);
   }
-}
-
-function extractProductKey(rawText) {
-  // Normalize: uppercase
-  let text = rawText.toUpperCase();
-
-  // ── 優先策略：找鑰匙符號後面的內容 ──
-  // OCR 對鑰匙符號(🔑/⚷)可能辨識成多種字元
-  // 常見辨識結果: o-, o—, 0-, Q-, key, KEY, o>
-  const keyAnchorRe = /(?:🔑|⚷|KEY|o-|o—|0-|Q-|o>|O-)\s*/i;
-  const anchorMatch = text.search(keyAnchorRe);
-  let searchText = anchorMatch >= 0
-    ? text.slice(anchorMatch).replace(keyAnchorRe, '')  // 從鑰匙符號後開始
-    : text;                                              // 找不到就全文搜尋
-
-  // 正規化：把分隔符號(· • . ,)和多餘空白統一處理
-  searchText = searchText
-    .replace(/[·•\.\,]/g, ' ')
-    .replace(/[^\w\s\-]/g, ' ')
-    .replace(/\s+/g, ' ');
-
-  // ── Strategy 1: Standard XXXXX-XXXXX-XXXXX-XXXXX-XXXXX ──
-  const m1 = searchText.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
-  if (m1) return m1[0];
-
-  // ── Strategy 2: 5個群組（跨行、空格分隔）──
-  const groups = [];
-  const groupRe = /\b([A-Z0-9]{5})\b/g;
-  let gm;
-  while ((gm = groupRe.exec(searchText)) !== null) {
-    groups.push(gm[1]);
-  }
-  if (groups.length >= 5) {
-    return groups.slice(0, 5).join('-');
-  }
-
-  // ── Strategy 3: 25碼連續（無分隔符）──
-  const m3 = searchText.replace(/[\s\-]/g, '').match(/[A-Z0-9]{25}/);
-  if (m3) {
-    const k = m3[0];
-    return `${k.slice(0,5)}-${k.slice(5,10)}-${k.slice(10,15)}-${k.slice(15,20)}-${k.slice(20,25)}`;
-  }
-
-  // ── Fallback: 全文撈，groups >= 5 ──
-  if (groups.length < 5) {
-    const allGroups = [];
-    const re2 = /\b([A-Z0-9]{5})\b/g;
-    let m2;
-    const fullText = text.replace(/[·•\.\,]/g, ' ').replace(/[^\w\s\-]/g, ' ');
-    while ((m2 = re2.exec(fullText)) !== null) allGroups.push(m2[1]);
-    if (allGroups.length >= 5) return allGroups.slice(0, 5).join('-');
-  }
-
-  return null;
-}
-
-function extractPartial(rawText) {
-  // Best-effort: collect all 5-char alphanumeric tokens and join
-  let text = rawText.toUpperCase().replace(/[·•\.\,]/g, ' ').replace(/[^\w\s]/g, ' ');
-  const groups = [];
-  const re = /\b([A-Z0-9]{5})\b/g;
-  let m;
-  while ((m = re.exec(text)) !== null) groups.push(m[1]);
-  if (groups.length === 0) return '';
-  return groups.slice(0, 5).join('-');
 }
 
 function setOcrStatus(type, msg) {
