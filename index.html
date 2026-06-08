@@ -864,39 +864,54 @@ async function processImage(dataUrl) {
 }
 
 function extractProductKey(rawText) {
-  // Normalize: uppercase, replace common OCR mistakes
+  // Normalize: uppercase
   let text = rawText.toUpperCase();
 
-  // Common OCR confusion fixes for product keys
-  // (these mistakes happen on monospace alphanumeric)
-  text = text
-    .replace(/\bO\b/g, '0')   // isolated O → 0 (rare but happens)
-    .replace(/[·•·\.\,]/g, '-') // dots/bullets → dash
-    .replace(/[^\w\-\s]/g, ' ') // strip other special chars
+  // ── 優先策略：找鑰匙符號後面的內容 ──
+  // OCR 對鑰匙符號(🔑/⚷)可能辨識成多種字元
+  // 常見辨識結果: o-, o—, 0-, Q-, key, KEY, o>
+  const keyAnchorRe = /(?:🔑|⚷|KEY|o-|o—|0-|Q-|o>|O-)\s*/i;
+  const anchorMatch = text.search(keyAnchorRe);
+  let searchText = anchorMatch >= 0
+    ? text.slice(anchorMatch).replace(keyAnchorRe, '')  // 從鑰匙符號後開始
+    : text;                                              // 找不到就全文搜尋
+
+  // 正規化：把分隔符號(· • . ,)和多餘空白統一處理
+  searchText = searchText
+    .replace(/[·•\.\,]/g, ' ')
+    .replace(/[^\w\s\-]/g, ' ')
     .replace(/\s+/g, ' ');
 
   // ── Strategy 1: Standard XXXXX-XXXXX-XXXXX-XXXXX-XXXXX ──
-  const m1 = text.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
+  const m1 = searchText.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
   if (m1) return m1[0];
 
-  // ── Strategy 2: Groups separated by spaces/dots/dashes across lines ──
-  // e.g. "YH9MB GTNPG" + "CJG29 RQJ4R" + "MWV23"
+  // ── Strategy 2: 5個群組（跨行、空格分隔）──
   const groups = [];
   const groupRe = /\b([A-Z0-9]{5})\b/g;
   let gm;
-  while ((gm = groupRe.exec(text)) !== null) {
+  while ((gm = groupRe.exec(searchText)) !== null) {
     groups.push(gm[1]);
   }
   if (groups.length >= 5) {
-    // Take first 5 valid groups
     return groups.slice(0, 5).join('-');
   }
 
-  // ── Strategy 3: 25 chars continuous (no separators) ──
-  const m3 = text.replace(/[\s\-]/g, '').match(/[A-Z0-9]{25}/);
+  // ── Strategy 3: 25碼連續（無分隔符）──
+  const m3 = searchText.replace(/[\s\-]/g, '').match(/[A-Z0-9]{25}/);
   if (m3) {
     const k = m3[0];
     return `${k.slice(0,5)}-${k.slice(5,10)}-${k.slice(10,15)}-${k.slice(15,20)}-${k.slice(20,25)}`;
+  }
+
+  // ── Fallback: 全文撈，groups >= 5 ──
+  if (groups.length < 5) {
+    const allGroups = [];
+    const re2 = /\b([A-Z0-9]{5})\b/g;
+    let m2;
+    const fullText = text.replace(/[·•\.\,]/g, ' ').replace(/[^\w\s\-]/g, ' ');
+    while ((m2 = re2.exec(fullText)) !== null) allGroups.push(m2[1]);
+    if (allGroups.length >= 5) return allGroups.slice(0, 5).join('-');
   }
 
   return null;
