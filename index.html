@@ -373,17 +373,22 @@
   /* Editable key input */
   #key-input {
     width: 100%;
+    min-height: 116px;
     background: rgba(0,0,0,0.4);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px 16px;
     font-family: 'Share Tech Mono', monospace;
-    font-size: 16px;
+    font-size: 18px;
+    line-height: 1.65;
     letter-spacing: 3px;
     color: var(--warn);
     text-transform: uppercase;
     outline: none;
     margin-bottom: 12px;
+    resize: none;
+    overflow: hidden;
+    white-space: pre;
     transition: border-color 0.2s;
   }
 
@@ -694,12 +699,15 @@
 
     <div class="key-label" style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:8px; font-family:'Share Tech Mono',monospace;">辨識結果（可手動修正）</div>
 
-    <input type="text"
+    <textarea
       id="key-input"
-      placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+      placeholder="XXXXX-XXXXX-
+XXXXX-XXXXX-
+XXXXX"
+      rows="3"
       maxlength="35"
       oninput="formatKeyInput(this)"
-    >
+    ></textarea>
 
     <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
 
@@ -741,6 +749,7 @@
 let stream = null;
 let doneCount = 0;
 let currentKey = '';
+let scanRunId = 0;
 
 // Load saved API key on startup
 window.addEventListener('DOMContentLoaded', () => {
@@ -807,6 +816,7 @@ function getApiKey() {
 }
 
 async function processImageV2(dataUrl) {
+  const runId = ++scanRunId;
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   const apiKey = getApiKey();
@@ -824,6 +834,7 @@ async function processImageV2(dataUrl) {
 
   try {
     const images = await prepareKeyImages(dataUrl);
+    if (runId !== scanRunId) return;
     if (images[0]?.dataUrl) {
       document.getElementById('captured-img').src = images[0].dataUrl;
     }
@@ -836,6 +847,7 @@ async function processImageV2(dataUrl) {
 
     try {
       ocrResult = await readWindowsKeyLocally(images, progressEl, statusEl);
+      if (runId !== scanRunId) return;
       rawText = ocrResult.text;
       key = normalizeProductKey(rawText);
     } catch (localErr) {
@@ -847,6 +859,7 @@ async function processImageV2(dataUrl) {
       progressEl.style.width = '65%';
       statusEl.textContent = 'Local OCR unclear. Trying Gemini fallback...';
       ocrResult = await readWindowsKeyWithGemini(apiKey, images);
+      if (runId !== scanRunId) return;
       rawText = ocrResult.text;
       const result = parseGeminiKeyResult(rawText);
       key = normalizeProductKey(result.key || rawText);
@@ -862,16 +875,17 @@ async function processImageV2(dataUrl) {
 
     if (key) {
       setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
-      setTimeout(() => showConfirm(key), 500);
+      showConfirm(key);
     } else {
       setOcrStatus('warning', 'No complete 25-character key found. Please edit manually.');
-      setTimeout(() => showConfirm(''), 600);
+      showConfirm('');
     }
   } catch (err) {
+    if (runId !== scanRunId) return;
     progressEl.style.width = '100%';
     setOcrStatus('error', `OCR failed: ${err.message}`);
     document.getElementById('ocr-raw').textContent = err.message;
-    setTimeout(() => showConfirm(''), 800);
+    showConfirm('');
   }
 }
 
@@ -1273,25 +1287,39 @@ function showConfirm(key) {
   showSection('sec-confirm');
   setStep(3);
   const input = document.getElementById('key-input');
-  input.value = key;
-  validateKey(key);
+  input.value = formatKeyForDisplay(key);
+  validateKey(input.value);
+  document.getElementById('sec-confirm').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function formatKeyInput(el) {
   let v = el.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  let out = '';
-  for (let i = 0; i < Math.min(v.length, 25); i++) {
-    if (i > 0 && i % 5 === 0) out += '-';
-    out += v[i];
-  }
+  const out = formatKeyForDisplay(v);
   el.value = out;
   validateKey(out);
+}
+
+function formatKeyForDisplay(key) {
+  const clean = String(key || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 25);
+  const groups = clean.match(/.{1,5}/g) || [];
+  const line1 = groups.slice(0, 2).join('-');
+  const line2 = groups.slice(2, 4).join('-');
+  const line3 = groups.slice(4, 5).join('-');
+  return [line1, line2, line3].filter(Boolean).map((line, idx) => {
+    const needsDash = idx < 2 && line.replace(/-/g, '').length === 10;
+    return needsDash ? `${line}-` : line;
+  }).join('\n');
+}
+
+function getNormalizedKeyFromInput() {
+  const clean = document.getElementById('key-input').value.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 25);
+  return clean.length === 25 ? clean.match(/.{1,5}/g).join('-') : '';
 }
 
 function validateKey(key) {
   const hint = document.getElementById('key-valid-hint');
   const btn = document.getElementById('btn-gen-qr');
-  const clean = key.replace(/-/g, '');
+  const clean = key.replace(/[^A-Za-z0-9]/g, '');
   if (clean.length === 25) {
     hint.textContent = '✓ 格式正確 (25碼)';
     hint.style.color = 'var(--success)';
@@ -1305,7 +1333,7 @@ function validateKey(key) {
 
 // ─── QR Code ──────────────────────────────────────────────
 function generateQR() {
-  const key = document.getElementById('key-input').value.trim();
+  const key = getNormalizedKeyFromInput();
   currentKey = key;
 
   showSection('sec-qr');
@@ -1324,6 +1352,7 @@ function generateQR() {
     colorLight: '#ffffff',
     correctLevel: QRCode.CorrectLevel.H
   });
+  document.getElementById('sec-qr').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // ─── Navigation ───────────────────────────────────────────
@@ -1334,19 +1363,32 @@ function nextDevice() {
 }
 
 function resetAll() {
+  scanRunId++;
+  currentKey = '';
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   document.getElementById('btn-camera').style.display = 'flex';
   document.getElementById('btn-shoot').style.display = 'none';
-  document.getElementById('stream').style.display = 'none';
-  document.getElementById('preview').style.display = 'none';
+  const video = document.getElementById('stream');
+  video.srcObject = null;
+  video.style.display = 'none';
+  const preview = document.getElementById('preview');
+  preview.src = '';
+  preview.style.display = 'none';
+  document.getElementById('captured-img').src = '';
+  document.getElementById('captured-wrap').style.display = 'none';
   document.getElementById('file-input').value = '';
   document.getElementById('key-input').value = '';
   document.getElementById('qr-box').innerHTML = '';
+  document.getElementById('qr-key-text').textContent = '';
+  document.getElementById('ocr-raw').textContent = 'Waiting for OCR...';
   document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('btn-gen-qr').disabled = true;
+  setOcrStatus('processing', 'Waiting for image...');
 
   showSection('sec-capture');
   setStep(1);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function showSection(id) {
