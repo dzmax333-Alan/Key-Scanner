@@ -380,14 +380,10 @@
     font-family: 'Share Tech Mono', monospace;
     font-size: 16px;
     letter-spacing: 3px;
-    line-height: 1.7;
     color: var(--warn);
     text-transform: uppercase;
     outline: none;
     margin-bottom: 12px;
-    min-height: 92px;
-    resize: none;
-    overflow: hidden;
     transition: border-color 0.2s;
   }
 
@@ -647,11 +643,10 @@
 
     <div class="or-divider">或</div>
 
-    <input type="file" id="file-input" accept="image/*" capture="environment" onchange="handleFile(event)">
+    <input type="file" id="file-input" accept="image/*" onchange="handleFile(event)">
     <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">
       🖼️ 從相簿選擇圖片
     </button>
-    <div id="camera-error" style="display:none; margin-top:12px; font-size:12px; line-height:1.6; color:var(--warn); font-family:'Share Tech Mono',monospace;"></div>
   </div>
 
   <!-- STEP 2: OCR 處理中 -->
@@ -671,9 +666,9 @@
       <div class="progress-fill" id="progress-fill" style="width:0%"></div>
     </div>
 
-    <div id="ocr-debug" style="display:none; margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.2);">
-      <div style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:6px; font-family:'Share Tech Mono',monospace;">OCR 原始辨識文字</div>
-      <pre id="ocr-raw-text" style="white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.5; color:var(--text); font-family:'Share Tech Mono',monospace;"></pre>
+    <div id="ocr-raw-wrap" style="margin-top:10px;">
+      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">OCR 原始辨識文字</div>
+      <div id="ocr-raw" style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--muted); background:rgba(0,0,0,0.3); border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-all; max-height:120px; overflow-y:auto; min-height:36px;">等待辨識...</div>
     </div>
   </div>
 
@@ -683,13 +678,12 @@
 
     <div class="key-label" style="font-size:10px; letter-spacing:2px; color:var(--muted); margin-bottom:8px; font-family:'Share Tech Mono',monospace;">辨識結果（可手動修正）</div>
 
-    <textarea
+    <input type="text"
       id="key-input"
-      rows="2"
-      placeholder="XXXXX-XXXXX-XXXXX&#10;XXXXX-XXXXX"
-      maxlength="40"
+      placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+      maxlength="35"
       oninput="formatKeyInput(this)"
-    ></textarea>
+    >
 
     <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
 
@@ -734,48 +728,20 @@ let currentKey = '';
 
 // ─── Camera ───────────────────────────────────────────────
 async function startCamera() {
-  const errorEl = document.getElementById('camera-error');
-  if (errorEl) errorEl.style.display = 'none';
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showCameraFallback('這個瀏覽器不能直接開啟即時相機，已改用手機拍照上傳。');
-    return;
-  }
-
   try {
-    const s = await navigator.mediaDevices.getUserMedia(getCameraConstraints());
+    const s = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
     stream = s;
     const video = document.getElementById('stream');
     video.srcObject = s;
-    await video.play();
     video.style.display = 'block';
     document.getElementById('preview').style.display = 'none';
     document.getElementById('btn-camera').style.display = 'none';
     document.getElementById('btn-shoot').style.display = 'flex';
   } catch (e) {
-    showCameraFallback(`無法開啟即時相機：${e && e.name ? e.name : '權限或瀏覽器限制'}。已改用手機拍照上傳。`);
+    alert('無法開啟相機，請改用相簿選圖功能。');
   }
-}
-
-function getCameraConstraints() {
-  return {
-    video: {
-      facingMode: { ideal: 'environment' },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 }
-    },
-    audio: false
-  };
-}
-
-function showCameraFallback(message) {
-  const errorEl = document.getElementById('camera-error');
-  if (errorEl) {
-    errorEl.textContent = message + ' 若要使用即時預覽相機，請用 HTTPS 網址開啟此頁。';
-    errorEl.style.display = 'block';
-  }
-  const input = document.getElementById('file-input');
-  if (input) input.click();
 }
 
 function shootPhoto() {
@@ -796,8 +762,47 @@ function handleFile(e) {
   reader.readAsDataURL(file);
 }
 
+// ─── Image Preprocessing ──────────────────────────────────
+function preprocessImage(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      // Scale up for better OCR
+      const scale = Math.max(1, Math.min(3, 1800 / img.width));
+      canvas.width  = img.width  * scale;
+      canvas.height = img.height * scale;
+      const ctx = canvas.getContext('2d');
+
+      // Draw original
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // Get pixel data
+      const idata = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = idata.data;
+
+      for (let i = 0; i < d.length; i += 4) {
+        // Convert to grayscale (luminance)
+        const gray = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+
+        // High contrast: boost dark pixels (text), suppress mid-tones (background pattern)
+        // The COA sticker has dark text on colorful background
+        // Aggressive threshold: <100 = black text, >100 = white background
+        const val = gray < 110 ? 0 : 255;
+
+        d[i] = d[i+1] = d[i+2] = val;
+        d[i+3] = 255;
+      }
+
+      ctx.putImageData(idata, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.src = dataUrl;
+  });
+}
+
 // ─── OCR ──────────────────────────────────────────────────
-function processImage(dataUrl) {
+async function processImage(dataUrl) {
   // Stop camera
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
@@ -811,53 +816,101 @@ function processImage(dataUrl) {
 
   const statusEl = document.getElementById('ocr-status-text');
   const progressEl = document.getElementById('progress-fill');
-  const debugEl = document.getElementById('ocr-debug');
-  const rawTextEl = document.getElementById('ocr-raw-text');
-  if (debugEl) debugEl.style.display = 'none';
-  if (rawTextEl) rawTextEl.textContent = '';
 
-  Tesseract.recognize(dataUrl, 'eng', {
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
-    preserve_interword_spaces: '1',
+  // Step 1: preprocess
+  statusEl.textContent = '圖像前處理中（強化對比）...';
+  progressEl.style.width = '5%';
+  const processed = await preprocessImage(dataUrl);
+
+  // Show preprocessed preview too
+  document.getElementById('captured-img').src = processed;
+
+  // Step 2: OCR with best config for product keys
+  const config = {
     logger: m => {
       if (m.status === 'recognizing text') {
-        const pct = Math.round(m.progress * 100);
+        const pct = Math.round(m.progress * 90) + 10;
         progressEl.style.width = pct + '%';
         statusEl.textContent = `辨識中... ${pct}%`;
       }
-    }
-  }).then(({ data: { text } }) => {
+    },
+    // Tesseract params: single block, alphanumeric only
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-· ',
+    tessedit_pageseg_mode: '6', // Assume uniform block of text
+  };
+
+  try {
+    const { data: { text } } = await Tesseract.recognize(processed, 'eng', config);
     progressEl.style.width = '100%';
-    if (rawTextEl) rawTextEl.textContent = text.trim() || '（沒有辨識到任何文字）';
-    if (debugEl) debugEl.style.display = 'block';
+
+    // Show raw OCR result for debugging
+    const rawDiv = document.getElementById('ocr-raw');
+    if (rawDiv) rawDiv.textContent = text.trim();
 
     const key = extractProductKey(text);
     if (key) {
       setOcrStatus('success', '✓ 辨識成功！');
       setTimeout(() => showConfirm(key), 500);
     } else {
-      setOcrStatus('warning', '⚠ 未找到標準格式，請手動輸入');
-      setTimeout(() => showConfirm(''), 600);
+      setOcrStatus('warning', '⚠ 未完整辨識，請核對或手動修正');
+      // Try to pre-fill partial result
+      const partial = extractPartial(text);
+      setTimeout(() => showConfirm(partial), 600);
     }
-  }).catch(err => {
+  } catch (err) {
     setOcrStatus('error', '✗ 辨識失敗，請手動輸入');
     setTimeout(() => showConfirm(''), 600);
-  });
+  }
 }
 
-function extractProductKey(text) {
-  // Windows Product Key: XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-  const cleaned = text.replace(/\s+/g, ' ').toUpperCase();
-  // Try standard 5x5 format
-  const m = cleaned.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
-  if (m) return m[0];
-  // Try without dashes (25 consecutive alphanumeric)
-  const m2 = cleaned.match(/[A-Z0-9]{25}/);
-  if (m2) {
-    const k = m2[0];
+function extractProductKey(rawText) {
+  // Normalize: uppercase, replace common OCR mistakes
+  let text = rawText.toUpperCase();
+
+  // Common OCR confusion fixes for product keys
+  // (these mistakes happen on monospace alphanumeric)
+  text = text
+    .replace(/\bO\b/g, '0')   // isolated O → 0 (rare but happens)
+    .replace(/[·•·\.\,]/g, '-') // dots/bullets → dash
+    .replace(/[^\w\-\s]/g, ' ') // strip other special chars
+    .replace(/\s+/g, ' ');
+
+  // ── Strategy 1: Standard XXXXX-XXXXX-XXXXX-XXXXX-XXXXX ──
+  const m1 = text.match(/[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}/);
+  if (m1) return m1[0];
+
+  // ── Strategy 2: Groups separated by spaces/dots/dashes across lines ──
+  // e.g. "YH9MB GTNPG" + "CJG29 RQJ4R" + "MWV23"
+  const groups = [];
+  const groupRe = /\b([A-Z0-9]{5})\b/g;
+  let gm;
+  while ((gm = groupRe.exec(text)) !== null) {
+    groups.push(gm[1]);
+  }
+  if (groups.length >= 5) {
+    // Take first 5 valid groups
+    return groups.slice(0, 5).join('-');
+  }
+
+  // ── Strategy 3: 25 chars continuous (no separators) ──
+  const m3 = text.replace(/[\s\-]/g, '').match(/[A-Z0-9]{25}/);
+  if (m3) {
+    const k = m3[0];
     return `${k.slice(0,5)}-${k.slice(5,10)}-${k.slice(10,15)}-${k.slice(15,20)}-${k.slice(20,25)}`;
   }
+
   return null;
+}
+
+function extractPartial(rawText) {
+  // Best-effort: collect all 5-char alphanumeric tokens and join
+  let text = rawText.toUpperCase().replace(/[·•\.\,]/g, ' ').replace(/[^\w\s]/g, ' ');
+  const groups = [];
+  const re = /\b([A-Z0-9]{5})\b/g;
+  let m;
+  while ((m = re.exec(text)) !== null) groups.push(m[1]);
+  if (groups.length === 0) return '';
+  return groups.slice(0, 5).join('-');
 }
 
 function setOcrStatus(type, msg) {
@@ -875,31 +928,25 @@ function showConfirm(key) {
   showSection('sec-confirm');
   setStep(3);
   const input = document.getElementById('key-input');
-  input.value = formatKeyForDisplay(key);
-  validateKey(input.value);
+  input.value = key;
+  validateKey(key);
 }
 
 function formatKeyInput(el) {
-  el.value = formatKeyForDisplay(el.value);
-  validateKey(el.value);
-}
-
-function normalizeKey(key) {
-  const clean = key.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 25);
-  const groups = clean.match(/.{1,5}/g) || [];
-  return groups.join('-');
-}
-
-function formatKeyForDisplay(key) {
-  const groups = normalizeKey(key).split('-').filter(Boolean);
-  if (groups.length <= 3) return groups.join('-');
-  return `${groups.slice(0, 3).join('-')}\n${groups.slice(3, 5).join('-')}`;
+  let v = el.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  let out = '';
+  for (let i = 0; i < Math.min(v.length, 25); i++) {
+    if (i > 0 && i % 5 === 0) out += '-';
+    out += v[i];
+  }
+  el.value = out;
+  validateKey(out);
 }
 
 function validateKey(key) {
   const hint = document.getElementById('key-valid-hint');
   const btn = document.getElementById('btn-gen-qr');
-  const clean = key.replace(/[^A-Za-z0-9]/g, '');
+  const clean = key.replace(/-/g, '');
   if (clean.length === 25) {
     hint.textContent = '✓ 格式正確 (25碼)';
     hint.style.color = 'var(--success)';
@@ -913,7 +960,7 @@ function validateKey(key) {
 
 // ─── QR Code ──────────────────────────────────────────────
 function generateQR() {
-  const key = normalizeKey(document.getElementById('key-input').value);
+  const key = document.getElementById('key-input').value.trim();
   currentKey = key;
 
   showSection('sec-qr');
@@ -952,8 +999,6 @@ function resetAll() {
   document.getElementById('key-input').value = '';
   document.getElementById('qr-box').innerHTML = '';
   document.getElementById('progress-fill').style.width = '0%';
-  document.getElementById('ocr-debug').style.display = 'none';
-  document.getElementById('ocr-raw-text').textContent = '';
 
   showSection('sec-capture');
   setStep(1);
