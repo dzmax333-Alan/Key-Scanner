@@ -599,7 +599,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.2</div>
+      <div class="version-badge" id="app-version">V1.3</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -765,7 +765,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.2';
+const APP_VERSION = 'V1.3';
 let stream = null;
 let currentKey = '';
 let scanRunId = 0;
@@ -888,7 +888,7 @@ async function processImageV2(dataUrl) {
       ocrResult = await readWindowsKeyLocally(images, progressEl, statusEl);
       if (runId !== scanRunId) return;
       rawText = ocrResult.text;
-      key = normalizeProductKey(rawText);
+      key = ocrResult.key || '';
     } catch (localErr) {
       if (!apiKey) throw localErr;
       rawText = `Local OCR failed: ${localErr.message}`;
@@ -909,8 +909,9 @@ async function processImageV2(dataUrl) {
       rawText,
       '',
       `OCR: ${ocrResult.model}`,
+      ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
       key ? `Detected: ${key}` : 'Detected: NOT_FOUND'
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     if (key) {
       setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
@@ -1025,13 +1026,17 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
       }
     });
 
+    const confidence = Number(result.data?.confidence || 0);
     const text = cleanupOcrText(result.data?.text || '');
-    texts.push(`--- ${img.label} / ${mode.label} ---\n${text}`);
+    const key = normalizeProductKey(text, { loose: false });
+    const looseKey = normalizeProductKey(text, { loose: true });
+    texts.push(`--- ${img.label} / ${mode.label} / ${Math.round(confidence)}% ---\n${text}${looseKey ? `\nCandidate: ${looseKey}` : ''}`);
 
-    const key = normalizeProductKey(text);
-    if (key) {
+    if (key && isReliableLocalKey(key, confidence, text)) {
       return {
         model: 'Local OCR',
+        confidence,
+        key,
         text: `${texts.join('\n\n')}\n\n${key}`
       };
     }
@@ -1039,6 +1044,8 @@ async function readWindowsKeyLocally(images, progressEl, statusEl) {
 
   return {
     model: 'Local OCR',
+    confidence: 0,
+    key: '',
     text: texts.join('\n\n')
   };
 }
@@ -1061,15 +1068,20 @@ function parseGeminiKeyResult(text) {
   }
 }
 
-function normalizeProductKey(value) {
+function normalizeProductKey(value, options = {}) {
   if (!value || /NOT[_\s-]?FOUND/i.test(value)) return '';
   const upper = String(value).toUpperCase();
   const direct = upper.match(/[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}/);
-  const compact = direct
-    ? direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25)
-    : findLooseProductKey(upper);
+  const compact = direct ? direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25) : (options.loose ? findLooseProductKey(upper) : '');
   if (compact.length !== 25) return '';
   return compact.match(/.{1,5}/g).join('-');
+}
+
+function isReliableLocalKey(key, confidence, text) {
+  const compact = key.replace(/-/g, '');
+  const digitCount = (compact.match(/\d/g) || []).length;
+  const hasVisibleGroups = /[A-Z0-9]{5}[-\s]+[A-Z0-9]{5}[-\s]+[A-Z0-9]{5}/.test(text);
+  return confidence >= 55 && digitCount >= 4 && hasVisibleGroups;
 }
 
 function findLooseProductKey(text) {
@@ -1436,6 +1448,12 @@ function nextDevice() {
 }
 
 function resetAll() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  scanRunId++;
+  window.location.reload();
+}
+
+function resetAllInPlace() {
   scanRunId++;
   currentKey = '';
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
