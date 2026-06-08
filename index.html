@@ -777,14 +777,14 @@ function shootPhoto() {
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0);
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
-  processImage(dataUrl);
+  processImageV2(dataUrl);
 }
 
 function handleFile(e) {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => processImage(ev.target.result);
+  reader.onload = ev => processImageV2(ev.target.result);
   reader.readAsDataURL(file);
 }
 
@@ -803,6 +803,170 @@ function saveApiKey() {
 
 function getApiKey() {
   return localStorage.getItem('gemini_api_key') || '';
+}
+
+async function processImageV2(dataUrl) {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    alert('Please enter Gemini API Key first.');
+    return;
+  }
+
+  document.getElementById('captured-img').src = dataUrl;
+  document.getElementById('captured-wrap').style.display = 'block';
+  showSection('sec-ocr');
+  setStep(2);
+
+  const statusEl = document.getElementById('ocr-status-text');
+  const progressEl = document.getElementById('progress-fill');
+
+  statusEl.textContent = 'Preparing image crops...';
+  progressEl.style.width = '20%';
+
+  try {
+    const images = await prepareKeyImages(dataUrl);
+    progressEl.style.width = '45%';
+    statusEl.textContent = 'Sending to Gemini OCR...';
+
+    const rawText = await readWindowsKeyWithGemini(apiKey, images);
+    const result = parseGeminiKeyResult(rawText);
+    const key = normalizeProductKey(result.key || rawText);
+
+    progressEl.style.width = '100%';
+    document.getElementById('ocr-raw').textContent = [
+      rawText,
+      '',
+      key ? `Detected: ${key}` : 'Detected: NOT_FOUND'
+    ].join('\n');
+
+    if (key) {
+      setOcrStatus('success', 'Gemini found a possible product key.');
+      setTimeout(() => showConfirm(key), 500);
+    } else {
+      setOcrStatus('warning', 'No complete 25-character key found. Please edit manually.');
+      setTimeout(() => showConfirm(''), 600);
+    }
+  } catch (err) {
+    progressEl.style.width = '100%';
+    setOcrStatus('error', `OCR failed: ${err.message}`);
+    document.getElementById('ocr-raw').textContent = err.message;
+    setTimeout(() => showConfirm(''), 800);
+  }
+}
+
+async function readWindowsKeyWithGemini(apiKey, images) {
+  const prompt = [
+    'You are reading a Microsoft Windows COA/product-key label photo.',
+    'Find ONLY the Windows product key printed as 5 groups of 5 uppercase letters/numbers.',
+    'The key is usually near the center-right/lower-right of the sticker, close to a small empty square checkbox.',
+    'Ignore barcodes, QR codes, website text, part numbers, dates, labels, and "Windows 11 IOT".',
+    'Return strict JSON only:',
+    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
+    'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
+    'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2. Do not invent missing characters.',
+    'Example from this label style: YH9MB-GTNPG-CJG29-RQJ4R-MWV23'
+  ].join('\n');
+
+  const parts = [{ text: prompt }];
+  images.forEach(img => {
+    parts.push({ text: `Image variant: ${img.label}` });
+    parts.push({ inline_data: { mime_type: img.mimeType, data: img.base64 } });
+  });
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 160,
+          responseMimeType: 'application/json'
+        }
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('\n').trim() || '';
+}
+
+function parseGeminiKeyResult(text) {
+  try {
+    const cleaned = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    return { key: text };
+  }
+}
+
+function normalizeProductKey(value) {
+  if (!value || /NOT[_\s-]?FOUND/i.test(value)) return '';
+  const upper = String(value).toUpperCase();
+  const direct = upper.match(/[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}[-\s]?[A-Z0-9]{5}/);
+  if (!direct) return '';
+  const compact = direct[0].replace(/[^A-Z0-9]/g, '').slice(0, 25);
+  if (compact.length !== 25) return '';
+  return compact.match(/.{1,5}/g).join('-');
+}
+
+function dataUrlToImage(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not load image.'));
+    img.src = dataUrl;
+  });
+}
+
+async function prepareKeyImages(dataUrl) {
+  const img = await dataUrlToImage(dataUrl);
+  const variants = [];
+  const addVariant = (label, rect, enhance = false) => {
+    const canvas = document.createElement('canvas');
+    const scale = enhance ? 2.2 : 1.4;
+    canvas.width = Math.round(rect.w * scale);
+    canvas.height = Math.round(rect.h * scale);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
+    if (enhance) enhanceForOcr(ctx, canvas.width, canvas.height);
+    const url = canvas.toDataURL('image/jpeg', 0.92);
+    variants.push({
+      label,
+      mimeType: 'image/jpeg',
+      base64: url.split(',')[1]
+    });
+  };
+
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  addVariant('full label', { x: 0, y: 0, w, h });
+  addVariant('center and right sticker area', { x: w * 0.28, y: h * 0.35, w: w * 0.70, h: h * 0.45 }, true);
+  addVariant('lower key text band', { x: w * 0.34, y: h * 0.48, w: w * 0.58, h: h * 0.25 }, true);
+  addVariant('right half including checkbox and key', { x: w * 0.40, y: h * 0.38, w: w * 0.56, h: h * 0.36 }, true);
+  return variants;
+}
+
+function enhanceForOcr(ctx, width, height) {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const contrast = Math.max(0, Math.min(255, (gray - 128) * 1.8 + 128));
+    data[i] = data[i + 1] = data[i + 2] = contrast < 150 ? 0 : 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
 }
 
 // ─── Gemini Vision OCR ────────────────────────────────────
