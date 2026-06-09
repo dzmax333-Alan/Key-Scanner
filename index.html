@@ -108,6 +108,22 @@
     font-family: 'Share Tech Mono', monospace;
   }
 
+  #api-qr-scanner {
+    display: none;
+    margin-top: 10px;
+    border: 1px solid rgba(0,212,255,0.35);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #000;
+  }
+
+  #api-qr-video {
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    display: block;
+  }
+
   /* Step indicator */
   .steps {
     display: flex;
@@ -599,7 +615,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.6</div>
+      <div class="version-badge" id="app-version">V1.7</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -652,8 +668,12 @@
     <div id="api-usage" style="margin-top:10px; font-size:11px; font-family:'Share Tech Mono',monospace; color:var(--warn); text-align:center;">Today API: 0/20</div>
     <input type="file" id="api-qr-input" accept="image/*" capture="environment" onchange="handleApiQrFile(event)" style="display:none;">
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px;">
-      <button class="btn btn-secondary" onclick="document.getElementById('api-qr-input').click()" style="margin-top:0;">Scan API QR</button>
+      <button class="btn btn-secondary" onclick="startApiQrScanner()" style="margin-top:0;">Scan API QR</button>
       <button class="btn btn-secondary" onclick="clearApiKey()" style="margin-top:0;">Clear / Change Key</button>
+    </div>
+    <div id="api-qr-scanner">
+      <video id="api-qr-video" autoplay playsinline muted></video>
+      <button class="btn btn-secondary" onclick="stopApiQrScanner()" style="margin:8px;">Cancel API QR Scan</button>
     </div>
     <div id="apikey-hint" style="margin-top:8px; font-size:10px; font-family:'Share Tech Mono',monospace; color:var(--muted); text-align:center;"></div>
   </div>
@@ -767,8 +787,10 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.6';
+const APP_VERSION = 'V1.7';
 let stream = null;
+let apiQrStream = null;
+let apiQrScanFrame = null;
 let currentKey = '';
 let scanRunId = 0;
 let keyInputVerified = true;
@@ -791,6 +813,7 @@ window.addEventListener('DOMContentLoaded', () => {
 // ─── Camera ───────────────────────────────────────────────
 async function startCamera() {
   try {
+    stopApiQrScanner();
     const s = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
@@ -894,6 +917,75 @@ function clearApiKey() {
 function extractApiKey(text) {
   const match = String(text || '').match(/AIza[0-9A-Za-z_-]{20,}/);
   return match ? match[0] : String(text || '').trim();
+}
+
+async function startApiQrScanner() {
+  const hint = document.getElementById('apikey-hint');
+  try {
+    if (!window.jsQR) throw new Error('QR decoder not loaded.');
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    stopApiQrScanner();
+    apiQrStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    const video = document.getElementById('api-qr-video');
+    video.srcObject = apiQrStream;
+    document.getElementById('api-qr-scanner').style.display = 'block';
+    hint.style.color = 'var(--accent)';
+    hint.textContent = 'Point camera at API key QR code...';
+    await video.play();
+    scanApiQrFrame();
+  } catch (err) {
+    hint.style.color = 'var(--accent2)';
+    hint.textContent = `API QR camera failed: ${err.message}`;
+    stopApiQrScanner();
+    document.getElementById('api-qr-input').click();
+  }
+}
+
+function stopApiQrScanner() {
+  if (apiQrScanFrame) {
+    cancelAnimationFrame(apiQrScanFrame);
+    apiQrScanFrame = null;
+  }
+  if (apiQrStream) {
+    apiQrStream.getTracks().forEach(t => t.stop());
+    apiQrStream = null;
+  }
+  const video = document.getElementById('api-qr-video');
+  if (video) video.srcObject = null;
+  const box = document.getElementById('api-qr-scanner');
+  if (box) box.style.display = 'none';
+}
+
+function scanApiQrFrame() {
+  const video = document.getElementById('api-qr-video');
+  if (!apiQrStream || !video || video.readyState < 2) {
+    apiQrScanFrame = requestAnimationFrame(scanApiQrFrame);
+    return;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+  if (code?.data) {
+    const key = extractApiKey(code.data);
+    document.getElementById('gemini-key-input').value = key;
+    setApiKey(key);
+    const hint = document.getElementById('apikey-hint');
+    hint.style.color = 'var(--success)';
+    hint.textContent = 'API key scanned and saved.';
+    document.getElementById('sec-apikey').style.borderColor = 'rgba(0,255,136,0.3)';
+    stopApiQrScanner();
+    return;
+  }
+
+  apiQrScanFrame = requestAnimationFrame(scanApiQrFrame);
 }
 
 function handleApiQrFile(e) {
@@ -1553,12 +1645,14 @@ function nextDevice() {
 }
 
 function resetAll() {
+  stopApiQrScanner();
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   scanRunId++;
   window.location.reload();
 }
 
 function resetAllInPlace() {
+  stopApiQrScanner();
   scanRunId++;
   currentKey = '';
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
