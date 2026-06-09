@@ -223,6 +223,37 @@
     background: var(--border);
   }
 
+  #sec-apikey.collapsed {
+    padding-bottom: 14px;
+  }
+
+  #sec-apikey.collapsed .api-key-content {
+    display: none;
+  }
+
+  .api-collapse-btn {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 2px solid var(--success);
+    background: rgba(0,255,136,0.12);
+    color: var(--success);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 20px;
+    line-height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 3;
+  }
+
+  #sec-apikey .panel-title {
+    padding-left: 34px;
+  }
+
   /* Camera area */
   #preview-wrap {
     position: relative;
@@ -615,7 +646,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.8</div>
+      <div class="version-badge" id="app-version">V1.9</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -653,12 +684,14 @@
   </div>
 
   <!-- API Key 設定 -->
-  <div class="panel" id="sec-apikey" style="border-color: rgba(255,214,10,0.3);">
+  <div class="panel collapsed" id="sec-apikey" style="border-color: rgba(255,214,10,0.3);">
+    <button type="button" class="api-collapse-btn" id="api-collapse-btn" onclick="toggleApiPanel()">+</button>
     <div class="panel-title" style="color:var(--warn);">Gemini API Key 設定</div>
     <label style="position:absolute; top:14px; right:14px; display:flex; align-items:center; gap:6px; font-size:11px; color:var(--warn); font-family:'Share Tech Mono',monospace; letter-spacing:1px;">
       <input type="checkbox" id="skip-confirm-toggle" onchange="saveSkipConfirmSetting()" style="width:16px; height:16px; accent-color:var(--success);">
       略過確認
     </label>
+    <div class="api-key-content">
     <div style="font-size:11px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:10px; line-height:1.6;">
       前往 <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);">aistudio.google.com</a> 免費取得 API Key
     </div>
@@ -680,6 +713,7 @@
       <button class="btn btn-secondary" onclick="stopApiQrScanner()" style="margin:8px;">Cancel API QR Scan</button>
     </div>
     <div id="apikey-hint" style="margin-top:8px; font-size:10px; font-family:'Share Tech Mono',monospace; color:var(--muted); text-align:center;"></div>
+    </div>
   </div>
 
   <!-- STEP 1: 拍照 -->
@@ -791,7 +825,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.8';
+const APP_VERSION = 'V1.9';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -906,6 +940,14 @@ function updateApiUsageDisplay() {
   const count = getApiUsage();
   el.textContent = `Today API: ${count}/20`;
   el.style.color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+}
+
+function toggleApiPanel() {
+  const panel = document.getElementById('sec-apikey');
+  const btn = document.getElementById('api-collapse-btn');
+  const collapsed = panel.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '+' : '-';
+  if (collapsed) stopApiQrScanner();
 }
 
 function saveSkipConfirmSetting() {
