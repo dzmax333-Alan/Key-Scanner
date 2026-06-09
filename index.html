@@ -615,7 +615,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.7</div>
+      <div class="version-badge" id="app-version">V1.8</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -655,6 +655,10 @@
   <!-- API Key 設定 -->
   <div class="panel" id="sec-apikey" style="border-color: rgba(255,214,10,0.3);">
     <div class="panel-title" style="color:var(--warn);">Gemini API Key 設定</div>
+    <label style="position:absolute; top:14px; right:14px; display:flex; align-items:center; gap:6px; font-size:11px; color:var(--warn); font-family:'Share Tech Mono',monospace; letter-spacing:1px;">
+      <input type="checkbox" id="skip-confirm-toggle" onchange="saveSkipConfirmSetting()" style="width:16px; height:16px; accent-color:var(--success);">
+      略過確認
+    </label>
     <div style="font-size:11px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:10px; line-height:1.6;">
       前往 <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent);">aistudio.google.com</a> 免費取得 API Key
     </div>
@@ -787,7 +791,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.7';
+const APP_VERSION = 'V1.8';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -800,6 +804,8 @@ window.addEventListener('DOMContentLoaded', () => {
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   window.scrollTo(0, 0);
   document.getElementById('app-version').textContent = APP_VERSION;
+  const skipToggle = document.getElementById('skip-confirm-toggle');
+  if (skipToggle) skipToggle.checked = shouldSkipConfirm();
   updateApiUsageDisplay();
   const saved = localStorage.getItem('gemini_api_key');
   if (saved) {
@@ -900,6 +906,15 @@ function updateApiUsageDisplay() {
   const count = getApiUsage();
   el.textContent = `Today API: ${count}/20`;
   el.style.color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+}
+
+function saveSkipConfirmSetting() {
+  const enabled = document.getElementById('skip-confirm-toggle').checked;
+  localStorage.setItem('skip_confirm_enabled', enabled ? '1' : '0');
+}
+
+function shouldSkipConfirm() {
+  return localStorage.getItem('skip_confirm_enabled') === '1';
 }
 
 function clearApiKey() {
@@ -1077,7 +1092,11 @@ async function processImageV2(dataUrl) {
 
     if (key) {
       setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
-      showConfirm(key, { verified: true });
+      if (shouldSkipConfirm()) {
+        generateQRForKey(key);
+      } else {
+        showConfirm(key, { verified: true });
+      }
     } else {
       setOcrStatus('warning', 'Gemini did not return a complete key. Please edit manually.');
       showConfirm('', { verified: true });
@@ -1616,6 +1635,10 @@ validateKey = function(key) {
 
 function generateQR() {
   const key = getNormalizedKeyFromInput();
+  generateQRForKey(key);
+}
+
+function generateQRForKey(key) {
   currentKey = key;
 
   showSection('sec-qr');
