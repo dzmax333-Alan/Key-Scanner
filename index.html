@@ -131,6 +131,25 @@
     justify-content: center;
     gap: 0;
     margin: 20px 0;
+    position: relative;
+  }
+
+  .api-usage-badge {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    min-width: 54px;
+    padding: 5px 8px;
+    border-radius: 7px;
+    border: 1px solid rgba(0,212,255,0.45);
+    background: rgba(0,212,255,0.08);
+    color: var(--success);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-align: center;
+    box-shadow: 0 0 12px rgba(0,212,255,0.12);
   }
 
   .step {
@@ -646,13 +665,14 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V1.9</div>
+      <div class="version-badge" id="app-version">V2.0</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
 
   <!-- Step indicator -->
   <div class="steps" id="steps">
+    <div class="api-usage-badge" id="api-usage-compact">0/20</div>
     <div class="step active" id="s1">
       <div class="step-num">01</div>
       <div class="step-label">拍照</div>
@@ -825,7 +845,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V1.9';
+const APP_VERSION = 'V2.0';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -936,10 +956,18 @@ function incrementApiUsage() {
 
 function updateApiUsageDisplay() {
   const el = document.getElementById('api-usage');
-  if (!el) return;
+  const compact = document.getElementById('api-usage-compact');
   const count = getApiUsage();
-  el.textContent = `Today API: ${count}/20`;
-  el.style.color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+  const color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+  if (el) {
+    el.textContent = `Today API: ${count}/20`;
+    el.style.color = color;
+  }
+  if (compact) {
+    compact.textContent = `${count}/20`;
+    compact.style.color = color;
+    compact.style.borderColor = count >= 20 ? 'rgba(255,107,53,0.6)' : count >= 16 ? 'rgba(255,214,10,0.6)' : 'rgba(0,255,136,0.45)';
+  }
 }
 
 function toggleApiPanel() {
