@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.0</div>
+      <div class="version-badge" id="app-version">V2.1</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -845,7 +845,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.0';
+const APP_VERSION = 'V2.1';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -908,15 +908,17 @@ function shootPhoto() {
 }
 
 // ─── Blur / focus detection ───────────────────────────────
-// Calibration note (2026-07): tested against a real failed-OCR photo from
-// the production label (dense hologram/barcode texture). That photo scored
-// ~1195 on this metric even though OCR failed - meaning failures on this
-// label type are often NOT primarily focus/blur issues (see confidence-based
-// retake check below, which is the more reliable signal). This threshold is
-// therefore set low and only meant to catch genuinely unusable photos
-// (heavy motion blur / camera moved during capture), not to fine-tune
-// "slightly soft" shots.
-const BLUR_THRESHOLD = 120;
+// Calibration data (2026-07), same label type, same algorithm:
+//   - Clearly sharp/legible photo   -> score ~1695
+//   - Clearly blurry/illegible photo -> score ~83
+//   - An earlier "OCR failed" photo -> score ~1195 (i.e. NOT blurry by this
+//     metric - that failure was likely caused by something other than
+//     focus, e.g. glare/angle/small text - which is why the confidence-based
+//     retake check below is kept as the primary safety net, and this blur
+//     check is a secondary filter for genuinely out-of-focus shots).
+// Threshold set well above the blurry sample and well below the sharp one.
+// Revisit if real-world false positives/negatives show up.
+const BLUR_THRESHOLD = 300;
 
 function estimateSharpness(sourceCanvas) {
   // Downscale for speed, convert to grayscale, then measure the variance
