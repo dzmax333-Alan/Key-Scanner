@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.1</div>
+      <div class="version-badge" id="app-version">V2.2</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -845,7 +845,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.1';
+const APP_VERSION = 'V2.2';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1192,9 +1192,9 @@ async function processImageV2(dataUrl) {
   try {
     const images = await prepareKeyImages(dataUrl);
     if (runId !== scanRunId) return;
-    if (images[0]?.dataUrl) {
-      document.getElementById('captured-img').src = images[0].dataUrl;
-    }
+    // Keep showing the operator's original color photo (already set above)
+    // instead of swapping in the internal black/white OCR crop - that
+    // binarized image is only meant for the API call, not for display.
     progressEl.style.width = '45%';
     statusEl.textContent = 'Sending to Gemini API...';
 
@@ -1268,7 +1268,7 @@ async function readWindowsKeyWithGemini(apiKey, images) {
   const parts = [{ text: prompt }];
   const apiImages = images.filter(img =>
     img.label === 'full label reference' ||
-    /key symbol - black text|tight key text/.test(img.label)
+    /guide frame/.test(img.label)
   ).slice(0, 3);
   apiImages.forEach(img => {
     parts.push({ text: `Image variant: ${img.label}` });
@@ -1467,45 +1467,56 @@ async function prepareKeyImages(dataUrl) {
 
   const w = img.naturalWidth || img.width;
   const h = img.naturalHeight || img.height;
-  const marker = findKeySymbolMarker(img, w, h);
-  const keyStartBand = marker
-    ? clampRect({
-        x: marker.x - w * 0.01,
-        y: marker.y - marker.h * 2.2,
-        w: Math.min(w * 0.66, w - marker.x),
-        h: Math.max(marker.h * 9, h * 0.18)
-      }, w, h)
-    : { x: w * 0.25, y: h * 0.43, w: w * 0.62, h: h * 0.24 };
-  const keyOnlyBand = marker
-    ? clampRect({
-        x: marker.x + marker.w * 0.75,
-        y: marker.y - marker.h * 1.8,
-        w: Math.min(w * 0.58, w - marker.x - marker.w * 0.75),
-        h: Math.max(marker.h * 8, h * 0.16)
-      }, w, h)
-    : { x: w * 0.34, y: h * 0.48, w: w * 0.50, h: h * 0.20 };
-  const tightKeyBand = marker
-    ? clampRect({
-        x: marker.x + marker.w * 1.4,
-        y: marker.y - marker.h * 1.4,
-        w: Math.min(w * 0.50, w - marker.x - marker.w * 1.4),
-        h: Math.max(marker.h * 6.5, h * 0.13)
-      }, w, h)
-    : { x: w * 0.39, y: h * 0.50, w: w * 0.44, h: h * 0.16 };
-  const rightKeyBand = marker
-    ? clampRect({
-        x: marker.x + marker.w,
-        y: marker.y - marker.h * 2.5,
-        w: Math.min(w * 0.56, w - marker.x - marker.w),
-        h: Math.max(marker.h * 10, h * 0.22)
-      }, w, h)
-    : { x: w * 0.40, y: h * 0.38, w: w * 0.52, h: h * 0.34 };
-  addVariant(marker ? 'detected key symbol - black text' : 'from key symbol - black text', keyStartBand, 'threshold');
-  addVariant('tight key text - black text', tightKeyBand, 'threshold');
-  addVariant('key only - black text', keyOnlyBand, 'threshold');
-  addVariant('right key area - black text', rightKeyBand, 'threshold');
+
+  // Instead of guessing where the sticker is (dark-pixel heuristics failed
+  // badly whenever the sticker only filled a small part of the frame, or
+  // when nearby printed text/holograms confused the detector - see the
+  // 2026-07 field screenshots), we crop the exact region the operator was
+  // told to aim at: the on-screen guide brackets (80% w x 40% h, centered
+  // in the #preview-wrap viewport, see CSS `.scan-frame-inner`). This
+  // reflects what the operator actually saw and aligned to, so it's far
+  // more reliable than a pixel heuristic.
+  const guideBand = getGuideFrameRect(w, h);
+
+  addVariant('guide frame - black text', guideBand, 'threshold');
+  addVariant('guide frame - color', guideBand, 'normal');
   addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
   return variants;
+}
+
+// Maps the on-screen scan guide box back into raw captured-photo pixel
+// coordinates. The guide box is defined in CSS as 80% width x 40% height,
+// centered, inside #preview-wrap (aspect-ratio 4/3). The live <video>
+// preview uses object-fit: cover inside that same box, so whichever
+// dimension of the raw camera frame doesn't match the 4:3 box gets
+// cropped symmetrically on screen - we replicate that crop math here so
+// the region we cut out of the captured photo matches what the operator
+// saw between the cyan brackets.
+function getGuideFrameRect(w, h) {
+  const containerAspect = 4 / 3; // must match #preview-wrap CSS aspect-ratio
+  const frameAspect = w / h;
+  let offsetX = 0, offsetY = 0, visibleW = w, visibleH = h;
+
+  if (frameAspect > containerAspect) {
+    // Raw frame is relatively wider than the 4:3 box -> left/right cropped on screen.
+    visibleW = containerAspect * h;
+    offsetX = (w - visibleW) / 2;
+  } else if (frameAspect < containerAspect) {
+    // Raw frame is relatively taller than the 4:3 box -> top/bottom cropped on screen.
+    visibleH = w / containerAspect;
+    offsetY = (h - visibleH) / 2;
+  }
+
+  // Guide box is 80% x 40% of the visible area, centered. Add generous
+  // padding since operators won't align pixel-perfectly - better to include
+  // a bit of surrounding label than to clip the key text.
+  const padFactor = 1.35;
+  const gw = Math.min(visibleW, visibleW * 0.80 * padFactor);
+  const gh = Math.min(visibleH, visibleH * 0.40 * padFactor);
+  const gx = offsetX + (visibleW - gw) / 2;
+  const gy = offsetY + (visibleH - gh) / 2;
+
+  return clampRect({ x: gx, y: gy, w: gw, h: gh }, w, h);
 }
 
 function clampRect(rect, maxW, maxH) {
@@ -1514,81 +1525,6 @@ function clampRect(rect, maxW, maxH) {
   const w = Math.max(1, Math.min(maxW - x, rect.w));
   const h = Math.max(1, Math.min(maxH - y, rect.h));
   return { x, y, w, h };
-}
-
-function findKeySymbolMarker(img, w, h) {
-  const search = {
-    x: Math.floor(w * 0.16),
-    y: Math.floor(h * 0.34),
-    w: Math.floor(w * 0.30),
-    h: Math.floor(h * 0.24)
-  };
-  const sample = 2;
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.floor(search.w / sample));
-  canvas.height = Math.max(1, Math.floor(search.h / sample));
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(img, search.x, search.y, search.w, search.h, 0, 0, canvas.width, canvas.height);
-  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const cols = new Array(canvas.width).fill(0);
-  const rows = new Array(canvas.height).fill(0);
-
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4;
-      const r = data[i], g = data[i + 1], b = data[i + 2];
-      const dark = r < 95 && g < 95 && b < 95 && Math.max(r, g, b) - Math.min(r, g, b) < 55;
-      if (dark) {
-        cols[x]++;
-        rows[y]++;
-      }
-    }
-  }
-
-  const colLimit = Math.max(2, canvas.height * 0.035);
-  const rowLimit = Math.max(2, canvas.width * 0.030);
-  const xRange = findDenseRange(cols, colLimit, 3);
-  const yRange = findDenseRange(rows, rowLimit, 2);
-  if (!xRange || !yRange) return null;
-
-  const box = {
-    x: search.x + xRange.start * sample,
-    y: search.y + yRange.start * sample,
-    w: Math.max(1, (xRange.end - xRange.start + 1) * sample),
-    h: Math.max(1, (yRange.end - yRange.start + 1) * sample)
-  };
-  const ratio = box.w / box.h;
-  if (box.w < w * 0.035 || box.w > w * 0.18 || box.h < h * 0.008 || box.h > h * 0.08) return null;
-  if (ratio < 2.0 || ratio > 9.0) return null;
-  return box;
-}
-
-function findDenseRange(values, threshold, gapLimit) {
-  let best = null;
-  let start = -1;
-  let end = -1;
-  let gap = 0;
-  for (let i = 0; i < values.length; i++) {
-    if (values[i] >= threshold) {
-      if (start < 0) start = i;
-      end = i;
-      gap = 0;
-    } else if (start >= 0) {
-      gap++;
-      if (gap > gapLimit) {
-        const candidate = { start, end };
-        if (!best || candidate.end - candidate.start > best.end - best.start) best = candidate;
-        start = -1;
-        end = -1;
-        gap = 0;
-      }
-    }
-  }
-  if (start >= 0) {
-    const candidate = { start, end };
-    if (!best || candidate.end - candidate.start > best.end - best.start) best = candidate;
-  }
-  return best && best.end >= best.start ? best : null;
 }
 
 function enhanceForOcr(ctx, width, height, mode = 'threshold') {
