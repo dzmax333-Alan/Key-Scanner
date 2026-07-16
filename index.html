@@ -895,8 +895,66 @@ function shootPhoto() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0);
+
+  const sharpness = estimateSharpness(canvas);
+  if (sharpness < BLUR_THRESHOLD) {
+    setOcrStatus('warning', `⚠ 照片可能模糊 (清晰度 ${Math.round(sharpness)})，請保持穩定對焦後重拍`);
+    document.getElementById('sec-capture').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return; // keep camera stream open, let the operator retake immediately
+  }
+
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
   processImageV2(dataUrl);
+}
+
+// ─── Blur / focus detection ───────────────────────────────
+// Calibration note (2026-07): tested against a real failed-OCR photo from
+// the production label (dense hologram/barcode texture). That photo scored
+// ~1195 on this metric even though OCR failed - meaning failures on this
+// label type are often NOT primarily focus/blur issues (see confidence-based
+// retake check below, which is the more reliable signal). This threshold is
+// therefore set low and only meant to catch genuinely unusable photos
+// (heavy motion blur / camera moved during capture), not to fine-tune
+// "slightly soft" shots.
+const BLUR_THRESHOLD = 120;
+
+function estimateSharpness(sourceCanvas) {
+  // Downscale for speed, convert to grayscale, then measure the variance
+  // of a simple Laplacian (edge) response. Sharp/in-focus photos have
+  // strong edges and therefore high variance; blurry photos are smooth
+  // and score low.
+  const sampleW = 240;
+  const scale = sampleW / sourceCanvas.width;
+  const sampleH = Math.max(1, Math.round(sourceCanvas.height * scale));
+
+  const small = document.createElement('canvas');
+  small.width = sampleW;
+  small.height = sampleH;
+  const sctx = small.getContext('2d', { willReadFrequently: true });
+  sctx.drawImage(sourceCanvas, 0, 0, sampleW, sampleH);
+
+  const { data } = sctx.getImageData(0, 0, sampleW, sampleH);
+  const gray = new Float32Array(sampleW * sampleH);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  let sum = 0;
+  let sumSq = 0;
+  let count = 0;
+  for (let y = 1; y < sampleH - 1; y++) {
+    for (let x = 1; x < sampleW - 1; x++) {
+      const idx = y * sampleW + x;
+      const lap =
+        gray[idx - 1] + gray[idx + 1] + gray[idx - sampleW] + gray[idx + sampleW] - 4 * gray[idx];
+      sum += lap;
+      sumSq += lap * lap;
+      count++;
+    }
+  }
+  if (count === 0) return 0;
+  const mean = sum / count;
+  return sumSq / count - mean * mean; // variance of the Laplacian
 }
 
 function handleFile(e) {
@@ -1161,10 +1219,14 @@ async function processImageV2(dataUrl) {
     ].filter(Boolean).join('\n');
 
     if (key) {
-      setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
-      if (shouldSkipConfirm()) {
+      const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
+      if (lowConfidence) {
+        setOcrStatus('warning', `${ocrResult.model} 信心值偏低 (${Math.round(ocrResult.confidence)}%)，請仔細核對每個字元，必要時重拍`);
+        showConfirm(key, { verified: false }); // force manual double-check even if "skip confirm" is on
+      } else if (shouldSkipConfirm()) {
         generateQRForKey(key);
       } else {
+        setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
         showConfirm(key, { verified: true });
       }
     } else {
@@ -1180,12 +1242,18 @@ async function processImageV2(dataUrl) {
   }
 }
 
+// Below this Gemini-reported confidence (%), always require manual
+// verification before generating the QR code, even if "skip confirm" is
+// enabled - low confidence is a better retake signal than client-side blur
+// detection for this label type (see BLUR_THRESHOLD note above).
+const CONFIDENCE_RETAKE_THRESHOLD = 60;
+
 async function readWindowsKeyWithGemini(apiKey, images) {
   const prompt = [
     'You are reading a Microsoft Windows COA/product-key label photo.',
     'Find ONLY the Windows product key printed as 5 groups of 5 uppercase letters/numbers.',
-    'The key is usually near the center-right/lower-right of the sticker, close to a small empty square checkbox.',
-    'Ignore barcodes, QR codes, website text, part numbers, dates, labels, and "Windows 11 IOT".',
+    'Anchor strategy: first locate the text "howtotell.com" printed on the label. The product key is printed directly beside or below it, next to a small key icon (🔑) and a small empty square checkbox.',
+    'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
     'Return strict JSON only:',
     '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
     'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
@@ -1433,7 +1501,6 @@ async function prepareKeyImages(dataUrl) {
   addVariant(marker ? 'detected key symbol - black text' : 'from key symbol - black text', keyStartBand, 'threshold');
   addVariant('tight key text - black text', tightKeyBand, 'threshold');
   addVariant('key only - black text', keyOnlyBand, 'threshold');
-  addVariant(marker ? 'detected key symbol - inverted' : 'from key symbol - inverted', keyStartBand, 'invert');
   addVariant('right key area - black text', rightKeyBand, 'threshold');
   addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
   return variants;
