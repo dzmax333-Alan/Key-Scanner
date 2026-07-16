@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.2</div>
+      <div class="version-badge" id="app-version">V2.3</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -845,7 +845,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.2';
+const APP_VERSION = 'V2.3';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -904,7 +904,22 @@ function shootPhoto() {
   }
 
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
-  processImageV2(dataUrl);
+  processImageV2(dataUrl, getPreviewContainerAspect());
+}
+
+// Reads the ACTUAL rendered aspect ratio of #preview-wrap at capture time,
+// instead of assuming the CSS `aspect-ratio: 4/3` rule took effect. Some
+// browsers/webviews (e.g. older com.android.browser-based ones) may not
+// apply that CSS property, which would silently break the guide-frame
+// crop math in getGuideFrameRect() - measuring the live layout box sidesteps
+// that entirely, since it reflects whatever actually got rendered.
+function getPreviewContainerAspect() {
+  const el = document.getElementById('preview-wrap');
+  const rect = el && el.getBoundingClientRect();
+  if (rect && rect.width > 0 && rect.height > 0) {
+    return rect.width / rect.height;
+  }
+  return 4 / 3; // fallback if layout hasn't painted yet for some reason
 }
 
 // ─── Blur / focus detection ───────────────────────────────
@@ -963,7 +978,7 @@ function handleFile(e) {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = ev => processImageV2(ev.target.result);
+  reader.onload = ev => processImageV2(ev.target.result, getPreviewContainerAspect());
   reader.readAsDataURL(file);
 }
 
@@ -1167,7 +1182,7 @@ async function decodeApiQrImage(dataUrl) {
   }
 }
 
-async function processImageV2(dataUrl) {
+async function processImageV2(dataUrl, containerAspect) {
   const runId = ++scanRunId;
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
@@ -1190,7 +1205,7 @@ async function processImageV2(dataUrl) {
   progressEl.style.width = '20%';
 
   try {
-    const images = await prepareKeyImages(dataUrl);
+    const images = await prepareKeyImages(dataUrl, containerAspect);
     if (runId !== scanRunId) return;
     // Keep showing the operator's original color photo (already set above)
     // instead of swapping in the internal black/white OCR crop - that
@@ -1442,7 +1457,7 @@ function dataUrlToImage(dataUrl) {
   });
 }
 
-async function prepareKeyImages(dataUrl) {
+async function prepareKeyImages(dataUrl, containerAspect) {
   const img = await dataUrlToImage(dataUrl);
   const variants = [];
   const addVariant = (label, rect, mode = 'normal') => {
@@ -1476,7 +1491,7 @@ async function prepareKeyImages(dataUrl) {
   // in the #preview-wrap viewport, see CSS `.scan-frame-inner`). This
   // reflects what the operator actually saw and aligned to, so it's far
   // more reliable than a pixel heuristic.
-  const guideBand = getGuideFrameRect(w, h);
+  const guideBand = getGuideFrameRect(w, h, containerAspect);
 
   addVariant('guide frame - black text', guideBand, 'threshold');
   addVariant('guide frame - color', guideBand, 'normal');
@@ -1492,8 +1507,8 @@ async function prepareKeyImages(dataUrl) {
 // cropped symmetrically on screen - we replicate that crop math here so
 // the region we cut out of the captured photo matches what the operator
 // saw between the cyan brackets.
-function getGuideFrameRect(w, h) {
-  const containerAspect = 4 / 3; // must match #preview-wrap CSS aspect-ratio
+function getGuideFrameRect(w, h, containerAspect) {
+  containerAspect = containerAspect || 4 / 3; // fallback only if not measured
   const frameAspect = w / h;
   let offsetX = 0, offsetY = 0, visibleW = w, visibleH = h;
 
