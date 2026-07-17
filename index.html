@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.5</div>
+      <div class="version-badge" id="app-version">V2.6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.5';
+const APP_VERSION = 'V2.6';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -901,14 +901,23 @@ function shootPhoto() {
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0);
 
-  const sharpness = estimateSharpness(canvas);
+  const containerAspect = getPreviewContainerAspect();
+  // Measure sharpness ONLY within the guide-frame crop (the same region
+  // that actually gets sent to Gemini) - not the whole raw photo. Whole-
+  // frame variance was getting diluted whenever the sticker only filled a
+  // small part of the shot and the rest was smooth, textureless chassis
+  // surface, letting genuinely blurry key text slip through undetected
+  // (see 2026-07 field reports). This also matches how BLUR_THRESHOLD was
+  // originally calibrated - against label-only crops, not full photos.
+  const guideRect = getGuideFrameRect(canvas.width, canvas.height, containerAspect);
+  const sharpness = estimateSharpness(canvas, guideRect);
   if (sharpness < BLUR_THRESHOLD) {
     retakeToStep1(`⚠ 照片可能模糊（清晰度 ${Math.round(sharpness)}），請保持穩定對焦後重拍`);
     return; // keep camera stream open, let the operator retake immediately
   }
 
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
-  processImageV2(dataUrl, getPreviewContainerAspect());
+  processImageV2(dataUrl, containerAspect);
 }
 
 // Forces the UI back to a clean Step 1 (camera) state and shows why -
@@ -948,7 +957,8 @@ function getPreviewContainerAspect() {
 }
 
 // ─── Blur / focus detection ───────────────────────────────
-// Calibration data (2026-07), same label type, same algorithm:
+// Calibration data (2026-07), measured on label-only crops (same as what
+// this check now samples, after the 2026-07 fix below):
 //   - Clearly sharp/legible photo   -> score ~1695
 //   - Clearly blurry/illegible photo -> score ~83
 //   - An earlier "OCR failed" photo -> score ~1195 (i.e. NOT blurry by this
@@ -956,24 +966,37 @@ function getPreviewContainerAspect() {
 //     focus, e.g. glare/angle/small text - which is why the confidence-based
 //     retake check below is kept as the primary safety net, and this blur
 //     check is a secondary filter for genuinely out-of-focus shots).
+// Fix (2026-07): this used to run on the WHOLE captured photo, which let
+// blurry key text slip through whenever the sticker only filled a small
+// part of the frame (a large smooth/textureless chassis background diluted
+// the average variance). Now measured on the guide-frame crop only, so the
+// numbers above are directly comparable again.
 // Threshold set well above the blurry sample and well below the sharp one.
 // Revisit if real-world false positives/negatives show up.
 const BLUR_THRESHOLD = 300;
 
-function estimateSharpness(sourceCanvas) {
+function estimateSharpness(sourceCanvas, rect) {
   // Downscale for speed, convert to grayscale, then measure the variance
   // of a simple Laplacian (edge) response. Sharp/in-focus photos have
   // strong edges and therefore high variance; blurry photos are smooth
   // and score low.
+  // If `rect` is given, only that sub-region is sampled (used to measure
+  // just the guide-frame crop instead of the whole photo - see the note
+  // above BLUR_THRESHOLD about why whole-frame measurement was unreliable).
+  const srcX = rect ? rect.x : 0;
+  const srcY = rect ? rect.y : 0;
+  const srcW = rect ? rect.w : sourceCanvas.width;
+  const srcH = rect ? rect.h : sourceCanvas.height;
+
   const sampleW = 240;
-  const scale = sampleW / sourceCanvas.width;
-  const sampleH = Math.max(1, Math.round(sourceCanvas.height * scale));
+  const scale = sampleW / srcW;
+  const sampleH = Math.max(1, Math.round(srcH * scale));
 
   const small = document.createElement('canvas');
   small.width = sampleW;
   small.height = sampleH;
   const sctx = small.getContext('2d', { willReadFrequently: true });
-  sctx.drawImage(sourceCanvas, 0, 0, sampleW, sampleH);
+  sctx.drawImage(sourceCanvas, srcX, srcY, srcW, srcH, 0, 0, sampleW, sampleH);
 
   const { data } = sctx.getImageData(0, 0, sampleW, sampleH);
   const gray = new Float32Array(sampleW * sampleH);
