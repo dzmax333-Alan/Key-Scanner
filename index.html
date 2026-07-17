@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.4</div>
+      <div class="version-badge" id="app-version">V2.5</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -751,6 +751,10 @@
         </div>
       </div>
       <div class="hint-overlay">將序號貼紙對準框內</div>
+    </div>
+
+    <div id="capture-warning" class="status-bar warning" style="display:none; margin-bottom:12px;">
+      <span id="capture-warning-text"></span>
     </div>
 
     <button class="btn btn-primary" id="btn-camera" onclick="startCamera()">
@@ -845,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.4';
+const APP_VERSION = 'V2.5';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -874,6 +878,7 @@ window.addEventListener('DOMContentLoaded', () => {
 async function startCamera() {
   try {
     stopApiQrScanner();
+    document.getElementById('capture-warning').style.display = 'none';
     const s = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
@@ -898,13 +903,33 @@ function shootPhoto() {
 
   const sharpness = estimateSharpness(canvas);
   if (sharpness < BLUR_THRESHOLD) {
-    setOcrStatus('warning', `⚠ 照片可能模糊 (清晰度 ${Math.round(sharpness)})，請保持穩定對焦後重拍`);
-    document.getElementById('sec-capture').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    retakeToStep1(`⚠ 照片可能模糊（清晰度 ${Math.round(sharpness)}），請保持穩定對焦後重拍`);
     return; // keep camera stream open, let the operator retake immediately
   }
 
   const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
   processImageV2(dataUrl, getPreviewContainerAspect());
+}
+
+// Forces the UI back to a clean Step 1 (camera) state and shows why -
+// used whenever a photo gets rejected before ever reaching Gemini (e.g.
+// the blur pre-check). Always calls showSection()/setStep() explicitly
+// rather than assuming which section is currently visible, so it works
+// correctly no matter what state the app was left in beforehand.
+function retakeToStep1(message) {
+  showSection('sec-capture');
+  setStep(1);
+  const banner = document.getElementById('capture-warning');
+  const text = document.getElementById('capture-warning-text');
+  if (message) {
+    text.textContent = message;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+  // Camera stream (if already running) is left untouched so the operator
+  // can retake immediately without waiting for it to reinitialize.
+  document.getElementById('sec-capture').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // Reads the ACTUAL rendered aspect ratio of #preview-wrap at capture time,
@@ -1291,22 +1316,31 @@ async function readWindowsKeyWithGemini(apiKey, images) {
   });
 
   const model = 'gemini-2.5-flash-lite';
+  let res;
+  try {
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 120,
+            responseMimeType: 'application/json'
+          }
+        })
+      }
+    );
+  } catch (networkErr) {
+    // Never reached Google (offline, DNS failure, timeout, etc.) - this did
+    // NOT consume real API quota, so don't count it against the daily 20.
+    throw new Error(`Network error before reaching Gemini: ${networkErr.message}`);
+  }
+  // A response - any response, success or error - means the request
+  // actually reached Google and counts against the real daily quota.
   incrementApiUsage();
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: {
-          temperature: 0,
-          maxOutputTokens: 120,
-          responseMimeType: 'application/json'
-        }
-      })
-    }
-  );
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1781,6 +1815,7 @@ function resetAllInPlace() {
 
   document.getElementById('btn-camera').style.display = 'flex';
   document.getElementById('btn-shoot').style.display = 'none';
+  document.getElementById('capture-warning').style.display = 'none';
   const video = document.getElementById('stream');
   video.srcObject = null;
   video.style.display = 'none';
