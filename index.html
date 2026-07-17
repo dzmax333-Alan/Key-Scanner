@@ -302,7 +302,7 @@
   }
 
   .scan-frame-inner {
-    width: 80%; height: 40%;
+    width: 78%; height: 20%;
     position: relative;
   }
 
@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.6</div>
+      <div class="version-badge" id="app-version">V2.7</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -750,7 +750,7 @@
           <div class="scan-line"></div>
         </div>
       </div>
-      <div class="hint-overlay">將序號貼紙對準框內</div>
+      <div class="hint-overlay">拉近鏡頭，將序號那 3 行文字對準框內</div>
     </div>
 
     <div id="capture-warning" class="status-bar warning" style="display:none; margin-bottom:12px;">
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.6';
+const APP_VERSION = 'V2.7';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -880,7 +880,11 @@ async function startCamera() {
     stopApiQrScanner();
     document.getElementById('capture-warning').style.display = 'none';
     const s = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+      // Bumped from 1920x1080 (2026-07): the guide box is now much tighter
+      // (just the key-text lines), so we want as many real sensor pixels
+      // as the device will give us on that smaller area. `ideal` degrades
+      // gracefully on devices that can't do 4K.
+      video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 } }
     });
     stream = s;
     const video = document.getElementById('stream');
@@ -973,6 +977,11 @@ function getPreviewContainerAspect() {
 // numbers above are directly comparable again.
 // Threshold set well above the blurry sample and well below the sharp one.
 // Revisit if real-world false positives/negatives show up.
+// Note (2026-07): the guide box just got much tighter (see
+// getGuideFrameRect) to encourage closer physical framing on the key text.
+// That changes what a "typical" crop looks like, so these calibration
+// numbers may drift - watch for new false positives/negatives and re-check
+// with fresh samples if so.
 const BLUR_THRESHOLD = 300;
 
 function estimateSharpness(sourceCanvas, rect) {
@@ -1565,7 +1574,7 @@ async function prepareKeyImages(dataUrl, containerAspect) {
 }
 
 // Maps the on-screen scan guide box back into raw captured-photo pixel
-// coordinates. The guide box is defined in CSS as 80% width x 40% height,
+// coordinates. The guide box is defined in CSS as 78% width x 20% height,
 // centered, inside #preview-wrap (aspect-ratio 4/3). The live <video>
 // preview uses object-fit: cover inside that same box, so whichever
 // dimension of the raw camera frame doesn't match the 4:3 box gets
@@ -1587,13 +1596,16 @@ function getGuideFrameRect(w, h, containerAspect) {
     offsetY = (h - visibleH) / 2;
   }
 
-  // Guide box is 80% x 40% of the visible area, centered. Padding trimmed
-  // from 1.35 to 1.15 (2026-07 speed pass) now that field testing confirms
-  // the guide-frame positioning itself is reliable - a smaller crop means
-  // a smaller image sent to Gemini, without giving up meaningful margin.
-  const padFactor = 1.15;
-  const gw = Math.min(visibleW, visibleW * 0.80 * padFactor);
-  const gh = Math.min(visibleH, visibleH * 0.40 * padFactor);
+  // Guide box matches #preview-wrap CSS (`.scan-frame-inner`): 78% width x
+  // 20% height, centered. Shrunk from 80%x40% (2026-07) once field testing
+  // showed physically zooming in on just the key-text lines - instead of
+  // fitting the whole COA sticker in frame - dramatically cut character
+  // misreads (V/C, 6/8 etc). A tighter on-screen box nudges operators to
+  // move the camera closer, which captures more real sensor pixels per
+  // character instead of relying on software crop+upscale of a wider shot.
+  const padFactor = 1.2;
+  const gw = Math.min(visibleW, visibleW * 0.78 * padFactor);
+  const gh = Math.min(visibleH, visibleH * 0.20 * padFactor);
   const gx = offsetX + (visibleW - gw) / 2;
   const gy = offsetY + (visibleH - gh) / 2;
 
