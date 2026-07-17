@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.3</div>
+      <div class="version-badge" id="app-version">V2.4</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -845,7 +845,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.3';
+const APP_VERSION = 'V2.4';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1463,7 +1463,10 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   const addVariant = (label, rect, mode = 'normal') => {
     const canvas = document.createElement('canvas');
     const enhance = mode !== 'normal';
-    const scale = enhance ? 2.6 : 1.4;
+    // Scaled down from 2.6/1.4 (2026-07 speed pass) - success rate was
+    // already solid with the guide-frame crop, so this trades a bit of
+    // upscaled resolution for smaller payloads / faster Gemini responses.
+    const scale = enhance ? 2.2 : 1.2;
     canvas.width = Math.round(rect.w * scale);
     canvas.height = Math.round(rect.h * scale);
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -1471,7 +1474,7 @@ async function prepareKeyImages(dataUrl, containerAspect) {
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
     if (enhance) enhanceForOcr(ctx, canvas.width, canvas.height, mode);
-    const url = canvas.toDataURL('image/jpeg', 0.92);
+    const url = canvas.toDataURL('image/jpeg', enhance ? 0.92 : 0.85);
     variants.push({
       label,
       dataUrl: url,
@@ -1493,8 +1496,13 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   // more reliable than a pixel heuristic.
   const guideBand = getGuideFrameRect(w, h, containerAspect);
 
+  // Speed pass (2026-07): field testing showed success rate was already
+  // high with the guide-frame crop, so we dropped the redundant color
+  // variant of the same crop (threshold version alone was carrying the
+  // OCR) down to 2 total API images instead of 3 - fewer images sent to
+  // Gemini means less to encode/upload and faster responses. Full
+  // reference is kept as a fallback/context image only.
   addVariant('guide frame - black text', guideBand, 'threshold');
-  addVariant('guide frame - color', guideBand, 'normal');
   addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
   return variants;
 }
@@ -1522,10 +1530,11 @@ function getGuideFrameRect(w, h, containerAspect) {
     offsetY = (h - visibleH) / 2;
   }
 
-  // Guide box is 80% x 40% of the visible area, centered. Add generous
-  // padding since operators won't align pixel-perfectly - better to include
-  // a bit of surrounding label than to clip the key text.
-  const padFactor = 1.35;
+  // Guide box is 80% x 40% of the visible area, centered. Padding trimmed
+  // from 1.35 to 1.15 (2026-07 speed pass) now that field testing confirms
+  // the guide-frame positioning itself is reliable - a smaller crop means
+  // a smaller image sent to Gemini, without giving up meaningful margin.
+  const padFactor = 1.15;
   const gw = Math.min(visibleW, visibleW * 0.80 * padFactor);
   const gh = Math.min(visibleH, visibleH * 0.40 * padFactor);
   const gx = offsetX + (visibleW - gw) / 2;
