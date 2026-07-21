@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">v3.0</div>
+      <div class="version-badge" id="app-version">v3.1</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'v3.0';
+const APP_VERSION = 'v3.1';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1600,8 +1600,13 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   // was actually helping OCR or just adding failure modes when the crop
   // wasn't perfectly aligned. Old black/white version is backed up
   // separately - swap `binarize: true` back on to revert.
-  addVariant('guide frame - color', guideBand, { scale: 2.2, quality: 0.92, binarize: false });
-  addVariant('full label reference', { x: 0, y: 0, w, h }, { scale: 1.2, quality: 0.85, binarize: false });
+  // 2026-07: dropped the 2.2x upscale on the guide-frame crop - now that
+  // operators are physically zooming in close (guide box shrunk to just
+  // the key-text lines), the crop already has plenty of real pixels.
+  // Upscaling a close-up shot just interpolates/blurs without adding real
+  // detail, and makes the payload bigger for no benefit.
+  addVariant('guide frame - color', guideBand, { scale: 1.0, quality: 0.92, binarize: false });
+  addVariant('full label reference', { x: 0, y: 0, w, h }, { scale: 1.0, quality: 0.85, binarize: false });
   return variants;
 }
 
