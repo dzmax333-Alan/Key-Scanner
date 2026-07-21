@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">v3.1</div>
+      <div class="version-badge" id="app-version">v3.2</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'v3.1';
+const APP_VERSION = 'v3.2';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1066,7 +1066,7 @@ function setApiKey(key) {
   updateApiUsageDisplay();
 }
 
-const DAILY_API_LIMIT = 25;
+const DAILY_API_LIMIT = 20;
 
 function todayString() {
   return new Date().toISOString().slice(0, 10);
@@ -1359,6 +1359,7 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Find ONLY the Windows product key printed as 5 groups of 5 uppercase letters/numbers.',
     'Anchor strategy: first locate the text "howtotell.com" printed on the label. The product key is printed directly beside or below it, next to a small key icon (🔑) and a small empty square checkbox.',
     'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
+    'These character pairs are easy to confuse in print - look closely at each one before deciding: E vs F (E has 3 horizontal strokes, F has only 2 - no bottom stroke), 0 vs O, 1 vs I, 5 vs S, 8 vs B, 6 vs G. Do not default to the more common-looking letter; read the actual strokes present.',
     'Return strict JSON only:',
     '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
     'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
