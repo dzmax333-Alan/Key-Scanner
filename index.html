@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">v3.3</div>
+      <div class="version-badge" id="app-version">V3.4</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'v3.3';
+const APP_VERSION = 'V3.4';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1066,7 +1066,7 @@ function setApiKey(key) {
   updateApiUsageDisplay();
 }
 
-const DAILY_API_LIMIT = 99;
+const DAILY_API_LIMIT = 20;
 
 function todayString() {
   return new Date().toISOString().slice(0, 10);
@@ -1300,6 +1300,17 @@ async function processImageV2(dataUrl, containerAspect) {
     rawText = ocrResult.text;
     const result = parseGeminiKeyResult(rawText);
     key = normalizeProductKey(result.key || rawText);
+
+    // Temporary targeted fix (2026-07): 'E' never legitimately appears in a
+    // Windows product key (see INVALID_KEY_CHARS below), and in every
+    // misread seen so far it turned out to actually be 'F'. Auto-correct
+    // this one specific, well-understood case rather than flagging for
+    // manual review. Other invalid characters are NOT auto-corrected yet -
+    // still routed to manual review via findInvalidKeyChars() below, since
+    // their "true" letter isn't as predictable as E->F.
+    const eToFCount = (key.match(/E/g) || []).length;
+    if (eToFCount > 0) key = key.replace(/E/g, 'F');
+
     candidateKey = key;
     ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
 
@@ -1309,6 +1320,7 @@ async function processImageV2(dataUrl, containerAspect) {
       '',
       `OCR: ${ocrResult.model}`,
       ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
+      eToFCount ? `Auto-corrected: E→F ×${eToFCount}` : '',
       key ? `Detected: ${key}` : (candidateKey ? `Candidate: ${candidateKey}` : 'Detected: NOT_FOUND')
     ].filter(Boolean).join('\n');
 
