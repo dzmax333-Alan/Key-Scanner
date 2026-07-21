@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.7</div>
+      <div class="version-badge" id="app-version">V2.8</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.7';
+const APP_VERSION = 'V2.8';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1066,6 +1066,8 @@ function setApiKey(key) {
   updateApiUsageDisplay();
 }
 
+const DAILY_API_LIMIT = 20;
+
 function todayString() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -1090,15 +1092,15 @@ function updateApiUsageDisplay() {
   const el = document.getElementById('api-usage');
   const compact = document.getElementById('api-usage-compact');
   const count = getApiUsage();
-  const color = count >= 20 ? 'var(--accent2)' : count >= 16 ? 'var(--warn)' : 'var(--success)';
+  const color = count >= DAILY_API_LIMIT ? 'var(--accent2)' : count >= DAILY_API_LIMIT - 4 ? 'var(--warn)' : 'var(--success)';
   if (el) {
-    el.textContent = `Today API: ${count}/20`;
+    el.textContent = `Today API: ${count}/${DAILY_API_LIMIT}`;
     el.style.color = color;
   }
   if (compact) {
-    compact.textContent = `${count}/20`;
+    compact.textContent = `${count}/${DAILY_API_LIMIT}`;
     compact.style.color = color;
-    compact.style.borderColor = count >= 20 ? 'rgba(255,107,53,0.6)' : count >= 16 ? 'rgba(255,214,10,0.6)' : 'rgba(0,255,136,0.45)';
+    compact.style.borderColor = count >= DAILY_API_LIMIT ? 'rgba(255,107,53,0.6)' : count >= DAILY_API_LIMIT - 4 ? 'rgba(255,214,10,0.6)' : 'rgba(0,255,136,0.45)';
   }
 }
 
@@ -1241,13 +1243,22 @@ async function decodeApiQrImage(dataUrl) {
 
 async function processImageV2(dataUrl, containerAspect) {
   const runId = ++scanRunId;
-  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   const apiKey = getApiKey();
   if (!apiKey) {
     alert('Please paste or scan Gemini API Key first.');
     return;
   }
+
+  if (getApiUsage() >= DAILY_API_LIMIT) {
+    // Don't even touch the camera stream or do any crop work - the request
+    // would never be sent anyway, so bail out immediately and send the
+    // operator straight back to a clean Step 1 with a clear reason.
+    retakeToStep1(`❌ 今日 API 次數已達上限（${DAILY_API_LIMIT}/${DAILY_API_LIMIT}），請明天再試，或更換 Gemini API Key`);
+    return;
+  }
+
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   document.getElementById('captured-img').src = dataUrl;
   document.getElementById('captured-wrap').style.display = 'block';
