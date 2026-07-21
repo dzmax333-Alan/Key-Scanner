@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.8</div>
+      <div class="version-badge" id="app-version">V2.9</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.8';
+const APP_VERSION = 'V2.9';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1088,6 +1088,15 @@ function incrementApiUsage() {
   return count;
 }
 
+// Called when Google itself reports the key's quota is exhausted (real
+// server-side limit), even if our own local per-app counter hadn't
+// reached DAILY_API_LIMIT yet - keeps the two in sync so the pre-check
+// in processImageV2() correctly blocks further attempts today.
+function forceApiUsageToLimit() {
+  localStorage.setItem('gemini_usage_count', String(DAILY_API_LIMIT));
+  updateApiUsageDisplay();
+}
+
 function updateApiUsageDisplay() {
   const el = document.getElementById('api-usage');
   const compact = document.getElementById('api-usage-compact');
@@ -1321,6 +1330,17 @@ async function processImageV2(dataUrl, containerAspect) {
   } catch (err) {
     if (runId !== scanRunId) return;
     progressEl.style.width = '100%';
+    if (isQuotaError(err.status, err.message)) {
+      // Google's real per-key quota is exhausted - this can happen even
+      // when our own local counter isn't at DAILY_API_LIMIT yet, since that
+      // counter only tracks calls made through this app, not the key's
+      // true usage elsewhere. Sync the local counter up to the limit so
+      // the pre-emptive check in processImageV2() also blocks further
+      // attempts today without needing to hit Google again to find out.
+      forceApiUsageToLimit();
+      retakeToStep1(`❌ 今日 API 次數已達上限（${DAILY_API_LIMIT}/${DAILY_API_LIMIT}），請明天再試，或更換 Gemini API Key`);
+      return;
+    }
     setOcrStatus('error', `OCR failed: ${err.message}`);
     document.getElementById('ocr-raw').textContent = err.message;
     showConfirm('');
@@ -1387,7 +1407,9 @@ async function readWindowsKeyWithGemini(apiKey, images) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `HTTP ${res.status}`);
+    const e = new Error(err.error?.message || `HTTP ${res.status}`);
+    e.status = res.status;
+    throw e;
   }
 
   const data = await res.json();
