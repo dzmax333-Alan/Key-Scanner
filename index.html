@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">v3.2</div>
+      <div class="version-badge" id="app-version">v3.3</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'v3.2';
+const APP_VERSION = 'v3.3';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1314,7 +1314,19 @@ async function processImageV2(dataUrl, containerAspect) {
 
     if (key) {
       const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
-      if (lowConfidence) {
+      const badChars = findInvalidKeyChars(key);
+      if (badChars.length) {
+        // These characters are documented (and code-verified via Microsoft's
+        // own key-decoding algorithm - base24 = BCDFGHJKMPQRTVWXY2346789) to
+        // never appear in a real Windows product key. If Gemini returns one,
+        // it's almost certainly a misread character (e.g. E/F confusion) -
+        // catch this automatically, no manual proofreading needed.
+        // Note: 'N' is deliberately NOT in this invalid set - it has a
+        // legitimate special-case appearance in "N edition" keys and we've
+        // observed it in genuine keys from this label stock.
+        setOcrStatus('warning', `⚠ 偵測到不可能出現在金鑰裡的字元（${badChars.join('、')}），可能誤判，請仔細核對`);
+        showConfirm(key, { verified: false });
+      } else if (lowConfidence) {
         setOcrStatus('warning', `${ocrResult.model} 信心值偏低 (${Math.round(ocrResult.confidence)}%)，請仔細核對每個字元，必要時重拍`);
         showConfirm(key, { verified: false }); // force manual double-check even if "skip confirm" is on
       } else if (shouldSkipConfirm()) {
@@ -1351,6 +1363,19 @@ async function processImageV2(dataUrl, containerAspect) {
 // verification before generating the QR code, even if "skip confirm" is
 // enabled - low confidence is a better retake signal than client-side blur
 // detection for this label type (see BLUR_THRESHOLD note above).
+// Characters that Microsoft's own product-key alphabet never produces.
+// Verified against the actual key-decoding algorithm (base24 charset =
+// "BCDFGHJKMPQRTVWXY2346789") rather than just forum posts, several of
+// which incorrectly also list N as excluded - N is deliberately excluded
+// from this list because it has a legitimate special-case appearance in
+// "N edition" keys, confirmed by real keys seen on this label stock.
+const INVALID_KEY_CHARS = new Set(['A', 'E', 'I', 'L', 'O', 'S', 'U', 'Z', '0', '1', '5']);
+
+function findInvalidKeyChars(key) {
+  const clean = String(key || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return [...new Set([...clean].filter(ch => INVALID_KEY_CHARS.has(ch)))];
+}
+
 const CONFIDENCE_RETAKE_THRESHOLD = 60;
 
 async function readWindowsKeyWithGemini(apiKey, images) {
@@ -1823,7 +1848,12 @@ validateKey = function(key) {
   const btn = document.getElementById('btn-gen-qr');
   const clean = key.replace(/[^A-Za-z0-9]/g, '');
   if (clean.length === 25) {
-    if (keyInputVerified) {
+    const badChars = findInvalidKeyChars(clean);
+    if (badChars.length) {
+      hint.textContent = `⚠ 含有金鑰不會出現的字元（${badChars.join('、')}），請再確認`;
+      hint.style.color = 'var(--warn)';
+      btn.disabled = false; // still allow override - operator may know better than the checker
+    } else if (keyInputVerified) {
       hint.textContent = '格式正確 (25碼)';
       hint.style.color = 'var(--success)';
       btn.disabled = false;
