@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V2.9</div>
+      <div class="version-badge" id="app-version">v3.0</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V2.9';
+const APP_VERSION = 'v3.0';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1559,21 +1559,20 @@ function dataUrlToImage(dataUrl) {
 async function prepareKeyImages(dataUrl, containerAspect) {
   const img = await dataUrlToImage(dataUrl);
   const variants = [];
-  const addVariant = (label, rect, mode = 'normal') => {
+  // scale/quality decoupled from binarize so we can A/B test color vs
+  // black/white at the SAME zoom level and JPEG quality - otherwise a
+  // difference in results could just be from the zoom/quality gap, not
+  // the color processing itself.
+  const addVariant = (label, rect, { scale, quality, binarize }) => {
     const canvas = document.createElement('canvas');
-    const enhance = mode !== 'normal';
-    // Scaled down from 2.6/1.4 (2026-07 speed pass) - success rate was
-    // already solid with the guide-frame crop, so this trades a bit of
-    // upscaled resolution for smaller payloads / faster Gemini responses.
-    const scale = enhance ? 2.2 : 1.2;
     canvas.width = Math.round(rect.w * scale);
     canvas.height = Math.round(rect.h * scale);
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
-    if (enhance) enhanceForOcr(ctx, canvas.width, canvas.height, mode);
-    const url = canvas.toDataURL('image/jpeg', enhance ? 0.92 : 0.85);
+    if (binarize) enhanceForOcr(ctx, canvas.width, canvas.height, 'threshold');
+    const url = canvas.toDataURL('image/jpeg', quality);
     variants.push({
       label,
       dataUrl: url,
@@ -1589,20 +1588,20 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   // badly whenever the sticker only filled a small part of the frame, or
   // when nearby printed text/holograms confused the detector - see the
   // 2026-07 field screenshots), we crop the exact region the operator was
-  // told to aim at: the on-screen guide brackets (80% w x 40% h, centered
+  // told to aim at: the on-screen guide brackets (78% w x 20% h, centered
   // in the #preview-wrap viewport, see CSS `.scan-frame-inner`). This
   // reflects what the operator actually saw and aligned to, so it's far
   // more reliable than a pixel heuristic.
   const guideBand = getGuideFrameRect(w, h, containerAspect);
 
-  // Speed pass (2026-07): field testing showed success rate was already
-  // high with the guide-frame crop, so we dropped the redundant color
-  // variant of the same crop (threshold version alone was carrying the
-  // OCR) down to 2 total API images instead of 3 - fewer images sent to
-  // Gemini means less to encode/upload and faster responses. Full
-  // reference is kept as a fallback/context image only.
-  addVariant('guide frame - black text', guideBand, 'threshold');
-  addVariant('full label reference', { x: 0, y: 0, w, h }, 'normal');
+  // 2026-07 A/B test build: sending the COLOR guide-frame crop instead of
+  // the black/white binarized one, at the SAME scale (2.2x) and quality
+  // (0.92) as the old black/white version, to test whether binarization
+  // was actually helping OCR or just adding failure modes when the crop
+  // wasn't perfectly aligned. Old black/white version is backed up
+  // separately - swap `binarize: true` back on to revert.
+  addVariant('guide frame - color', guideBand, { scale: 2.2, quality: 0.92, binarize: false });
+  addVariant('full label reference', { x: 0, y: 0, w, h }, { scale: 1.2, quality: 0.85, binarize: false });
   return variants;
 }
 
