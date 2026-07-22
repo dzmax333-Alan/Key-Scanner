@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.6</div>
+      <div class="version-badge" id="app-version">V3.7</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -814,6 +814,10 @@ XXXXX"
 
     <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
 
+    <button class="btn btn-secondary" id="btn-confirm-asis" onclick="confirmAsIs()" style="display:none; margin-bottom:12px;">
+      👁 我已核對，結果正確
+    </button>
+
     <button class="btn btn-success" id="btn-gen-qr" onclick="generateQR()">
       ✅ 確認，產生 QR Code
     </button>
@@ -849,7 +853,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.6';
+const APP_VERSION = 'V3.7';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1919,6 +1923,7 @@ function validateKey(key) {
 validateKey = function(key) {
   const hint = document.getElementById('key-valid-hint');
   const btn = document.getElementById('btn-gen-qr');
+  const asisBtn = document.getElementById('btn-confirm-asis');
   const clean = key.replace(/[^A-Za-z0-9]/g, '');
   if (clean.length === 25) {
     const badChars = findInvalidKeyChars(clean);
@@ -1926,21 +1931,35 @@ validateKey = function(key) {
       hint.textContent = `⚠ 含有金鑰不會出現的字元（${badChars.join('、')}），請再確認`;
       hint.style.color = 'var(--warn)';
       btn.disabled = false; // still allow override - operator may know better than the checker
+      asisBtn.style.display = 'none';
     } else if (keyInputVerified) {
       hint.textContent = '格式正確 (25碼)';
       hint.style.color = 'var(--success)';
       btn.disabled = false;
+      asisBtn.style.display = 'none';
     } else {
-      hint.textContent = 'OCR 候選碼，請核對後修改任一字再產生 QR';
+      // Gemini flagged this as low-confidence / uncertain. Don't force the
+      // operator to make a fake edit just to unlock the button when the
+      // read is already correct - give them an explicit "I checked it,
+      // it's right" action instead. Typing an actual correction in the
+      // textarea (formatKeyInput) still works too and unlocks the same way.
+      hint.textContent = 'OCR 候選碼，請核對序號是否正確（如需修改可直接編輯）';
       hint.style.color = 'var(--warn)';
       btn.disabled = true;
+      asisBtn.style.display = 'flex';
     }
   } else {
     hint.textContent = `已輸入 ${clean.length}/25 碼`;
     hint.style.color = clean.length > 0 ? 'var(--warn)' : 'var(--muted)';
     btn.disabled = clean.length !== 25;
+    asisBtn.style.display = 'none';
   }
 };
+
+function confirmAsIs() {
+  keyInputVerified = true;
+  validateKey(document.getElementById('key-input').value);
+}
 
 function generateQR() {
   const key = getNormalizedKeyFromInput();
@@ -2007,6 +2026,7 @@ function resetAllInPlace() {
   document.getElementById('ocr-raw').textContent = 'Waiting for OCR...';
   document.getElementById('progress-fill').style.width = '0%';
   document.getElementById('btn-gen-qr').disabled = true;
+  document.getElementById('btn-confirm-asis').style.display = 'none';
   setOcrStatus('processing', 'Waiting for image...');
 
   showSection('sec-capture');
