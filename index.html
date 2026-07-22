@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.5</div>
+      <div class="version-badge" id="app-version">V3.6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.5';
+const APP_VERSION = 'V3.6';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1306,6 +1306,19 @@ async function processImageV2(dataUrl, containerAspect) {
     candidateKey = key;
     ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
 
+    // Positions Gemini itself flagged as not-fully-certain (see prompt's
+    // uncertain_positions field). This is what lets us auto-generate the QR
+    // for the easy/confident cases while still catching the hard ones
+    // (like V/Y) instead of either trusting every read blindly or making
+    // the operator proofread all 25 characters on every single unit.
+    const compactForFlags = key ? key.replace(/-/g, '') : '';
+    const uncertainPositions = Array.isArray(result.uncertain_positions)
+      ? [...new Set(result.uncertain_positions)].filter(p => Number.isInteger(p) && p >= 1 && p <= 25)
+      : [];
+    const uncertainChars = uncertainPositions
+      .map(p => compactForFlags[p - 1])
+      .filter(Boolean);
+
     progressEl.style.width = '100%';
     document.getElementById('ocr-raw').textContent = [
       rawText,
@@ -1313,13 +1326,23 @@ async function processImageV2(dataUrl, containerAspect) {
       `OCR: ${ocrResult.model}`,
       ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
       eToFCount ? `Auto-corrected: E→F ×${eToFCount}` : '',
+      uncertainPositions.length ? `Uncertain positions: ${uncertainPositions.map((p, idx) => `#${p}(${uncertainChars[idx] || '?'})`).join(', ')}` : '',
       key ? `Detected: ${key}` : (candidateKey ? `Candidate: ${candidateKey}` : 'Detected: NOT_FOUND')
     ].filter(Boolean).join('\n');
 
     if (key) {
       const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
       const badChars = findInvalidKeyChars(key);
-      if (badChars.length) {
+      if (uncertainPositions.length) {
+        // Gemini told us directly it wasn't sure about specific characters
+        // (typically a V/Y or similar confusable pair) - this is a more
+        // targeted signal than overall confidence %, so it always forces a
+        // manual look even when "skip confirm" is on, but tells the
+        // operator exactly which character(s) to check instead of making
+        // them re-verify the whole string.
+        setOcrStatus('warning', `⚠ 第 ${uncertainPositions.join('、')} 碼不太確定（${uncertainChars.join('、')}），常見於 V/Y 混淆，請核對後再產生 QR`);
+        showConfirm(key, { verified: false });
+      } else if (badChars.length) {
         // These characters are documented (and code-verified via Microsoft's
         // own key-decoding algorithm - base24 = BCDFGHJKMPQRTVWXY2346789) to
         // never appear in a real Windows product key. If Gemini returns one,
@@ -1389,12 +1412,14 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Anchor strategy: first locate the text "howtotell.com" printed on the label. The product key is printed directly beside or below it, next to a small key icon (🔑) and a small empty square checkbox.',
     'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
     'These character pairs are easy to confuse in print - look closely at each one before deciding: E vs F (E has 3 horizontal strokes, F has only 2 - no bottom stroke), 0 vs O, 1 vs I, 5 vs S, 8 vs B, 6 vs G. Do not default to the more common-looking letter; read the actual strokes present.',
+    'V vs Y is a specific, frequent failure mode on this label stock - check it as carefully as E vs F: V is exactly two diagonal strokes meeting at a single point at the bottom, with nothing below that point (a clean "V" notch). Y is two diagonal strokes meeting in the middle, PLUS an additional short straight stroke that continues straight down from that meeting point to the character\'s baseline (a stem below the notch). Before deciding V or Y, explicitly look for whether that extra downward stem exists below the meeting point - do not decide by overall shape impression or by what "looks more common," decide only by whether the stem is present.',
+    'You may receive more than one image of the same crop: a full-color version and a black-and-white high-contrast version with the colorful background pattern digitally removed. The black-and-white version exists specifically to make faint strokes (like the Y stem above) easier to see through the background pattern. Cross-check the character strokes across all provided variants and agree on one answer; if variants disagree, trust the one where the stroke shapes are most unambiguous, and lower your confidence and flag that position in uncertain_positions.',
     'Return strict JSON only:',
-    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
-    'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
+    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"uncertain_positions":[],"notes":"short"}',
+    'uncertain_positions is an array of 1-based character positions (1 to 25, counting only the letters/digits and ignoring dashes) that you are genuinely not fully certain about - especially any position decided between V/Y, E/F, 0/O, 1/I, 5/S, 8/B, or 6/G where the stroke evidence was not perfectly clean. Leave it as [] only if you are confident in every single character.',
+    'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"uncertain_positions":[],"notes":"why"}.',
     'Never return the placeholder XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.',
-    'Do not use OCR guesses from other image variants as evidence; read the photo directly.',
-    'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2. Do not invent missing characters.',
+    'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2, V/Y. Do not invent missing characters.',
     'Example from this label style: YH9MB-GTNPG-CJG29-RQJ4R-MWV23'
   ].join('\n');
 
@@ -1420,7 +1445,7 @@ async function readWindowsKeyWithGemini(apiKey, images) {
           contents: [{ parts }],
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 120,
+            maxOutputTokens: 220,
             responseMimeType: 'application/json'
           }
         })
@@ -1636,6 +1661,17 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   // Upscaling a close-up shot just interpolates/blurs without adding real
   // detail, and makes the payload bigger for no benefit.
   addVariant('guide frame - color', guideBand, { scale: 1.0, quality: 0.92, binarize: false });
+  // 2026-07 V/Y fix: re-introduce a binarized variant of the SAME crop,
+  // sent alongside the color one (not instead of it). The colorful
+  // anti-counterfeit mosaic background sits right behind the last few
+  // characters on this label stock and was suspected of interfering with
+  // stroke-shape judgment for V-vs-Y specifically (both letters differ
+  // only in whether a short vertical stroke continues below the meeting
+  // point - exactly where the mosaic's fine detail competes for pixels).
+  // Thresholding removes that background and leaves pure black strokes on
+  // white, so Gemini gets both a full-detail and a stroke-only view of the
+  // same characters and can cross-check them against each other.
+  addVariant('guide frame - binarized (background pattern removed)', guideBand, { scale: 1.0, quality: 0.92, binarize: true });
   addVariant('full label reference', { x: 0, y: 0, w, h }, { scale: 1.0, quality: 0.85, binarize: false });
   return variants;
 }
@@ -1690,10 +1726,43 @@ function clampRect(rect, maxW, maxH) {
 function enhanceForOcr(ctx, width, height, mode = 'threshold') {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    const contrast = Math.max(0, Math.min(255, (gray - 128) * 2.1 + 128));
-    const bw = contrast < 165 ? 0 : 255;
+  const n = width * height;
+
+  // Build a grayscale histogram first, then pick the threshold with Otsu's
+  // method instead of a hardcoded constant. A fixed threshold (the old
+  // code used 165) only works for the lighting conditions it was tuned
+  // under - this label's colorful anti-counterfeit mosaic sits at very
+  // different brightness levels depending on ambient light, camera flash,
+  // and shadow, so a fixed cut point either eats into thin letter strokes
+  // (V/Y's connecting diagonal) or fails to remove the mosaic. Otsu's
+  // method picks, per-photo, the threshold that best separates the image
+  // into two brightness clusters (ink vs background), which adapts
+  // automatically to whatever lighting that particular shot has.
+  const hist = new Uint32Array(256);
+  const gray = new Uint8ClampedArray(n);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    gray[p] = g;
+    hist[g | 0]++;
+  }
+
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
+  let sumB = 0, wB = 0, maxVar = 0, threshold = 165; // 165 kept only as a fallback
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = n - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sumAll - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) { maxVar = between; threshold = t; }
+  }
+
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    const bw = gray[p] < threshold ? 0 : 255;
     const value = mode === 'invert' ? 255 - bw : bw;
     data[i] = data[i + 1] = data[i + 2] = value;
   }
