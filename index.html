@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.6</div>
+      <div class="version-badge" id="app-version">V3.7</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -849,7 +849,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.6';
+const APP_VERSION = 'V3.7';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1901,19 +1901,16 @@ function generateQRForKey(key) {
 }
 
 // ─── Navigation ───────────────────────────────────────────
+// 不再整頁 reload：改為原地重置 UI，並直接重新呼叫 startCamera()，
+// 讓使用者拍完（或按重新拍照）後不用再按一次「開啟相機」。
 function nextDevice() {
-  // 就地重置畫面（不整頁重新載入），並立刻自動開啟相機，
-  // 讓作業員按一次「下一台」就直接進入可拍照辨識的狀態，
-  // 不用再多按一次「開啟相機」。
   resetAllInPlace();
   startCamera();
 }
 
 function resetAll() {
-  stopApiQrScanner();
-  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
-  scanRunId++;
-  window.location.reload();
+  resetAllInPlace();
+  startCamera();
 }
 
 function resetAllInPlace() {
