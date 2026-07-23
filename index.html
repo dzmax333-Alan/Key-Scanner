@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">TEST3</div>
+      <div class="version-badge" id="app-version">TEST4</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -856,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'TEST3';
+const APP_VERSION = 'TEST4';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1316,11 +1316,11 @@ async function processImageV2(dataUrl, containerAspect) {
     // unconditionally, with no operator involvement; only a character
     // neither method can resolve ever reaches the manual-review UI below.
     let ambiguousResolution = null;
-    if (key && Array.isArray(result.ambiguous) && result.ambiguous.length) {
+    if (key && findAmbiguousKeyPositions(key).length) {
       const sourceImg = images.find(i => i.label === 'guide frame - color');
       if (sourceImg) {
         statusEl.textContent = '自動核對 V/Y 等易混淆字元...';
-        ambiguousResolution = await resolveAmbiguousChars(apiKey, key, result.ambiguous, sourceImg.dataUrl);
+        ambiguousResolution = await resolveAmbiguousChars(apiKey, key, sourceImg.dataUrl);
         if (runId !== scanRunId) return;
         key = ambiguousResolution.resolvedKey;
       }
@@ -1344,14 +1344,13 @@ async function processImageV2(dataUrl, containerAspect) {
     if (key) {
       const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
       const badChars = findInvalidKeyChars(key);
-      // Only characters that survived BOTH automated resolution steps above
-      // (or that Gemini never flagged as ambiguous in the first place, e.g.
-      // if it missed reporting a box) still need a human look. In normal
+      // resolveAmbiguousChars() now scans the key for every V/Y itself
+      // (no longer dependent on Gemini reporting them), so stillUnresolved
+      // already covers every position that needs a human look. In normal
       // operation this should be empty almost every time.
-      const unresolvedFromApi = ambiguousResolution?.stillUnresolved || [];
-      const covered = ambiguousResolution?.coveredPositions || new Set();
-      const missedByApi = findAmbiguousKeyPositions(key).filter(hit => !covered.has(hit.position));
-      const ambiguousHits = [...unresolvedFromApi, ...missedByApi];
+      const ambiguousHits = ambiguousResolution
+        ? ambiguousResolution.stillUnresolved
+        : findAmbiguousKeyPositions(key);
       if (badChars.length) {
         // These characters are documented (and code-verified via Microsoft's
         // own key-decoding algorithm - base24 = BCDFGHJKMPQRTVWXY2346789) to
@@ -1442,25 +1441,126 @@ function findAmbiguousKeyPositions(key) {
   return hits;
 }
 
-// Converts Gemini's normalized 0-1000 bounding box into a padded pixel
-// rect on the actual image it was measured against.
-function boxToPixelRect(box, W, H, padFrac = 0.15) {
-  let [ymin, xmin, ymax, xmax] = box;
-  let x0 = (xmin / 1000) * W, y0 = (ymin / 1000) * H;
-  let x1 = (xmax / 1000) * W, y1 = (ymax / 1000) * H;
-  const padX = (x1 - x0) * padFrac, padY = (y1 - y0) * padFrac;
-  x0 = Math.max(0, x0 - padX); y0 = Math.max(0, y0 - padY);
-  x1 = Math.min(W, x1 + padX); y1 = Math.min(H, y1 + padY);
-  return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+// Local character segmentation - NO AI localization involved.
+//
+// 2026-07 field testing showed Gemini's self-reported per-character
+// bounding boxes were not real detections: on a real photo it returned a
+// tiny (~2% x ~3%) box sitting dead-center in the image regardless of
+// which character was asked about - a placeholder value, not a location.
+// Asking a single Gemini call to both transcribe 25 characters AND give
+// pixel-precise coordinates for some of them is apparently more than it
+// can reliably do at once.
+//
+// So character localization is now done the way a license-plate reader
+// does it: classic image-processing (ink projection), using only pixels
+// we already have, no extra model call, no risk of a hallucinated box.
+// Validated against an actual photographed label from this label stock
+// before shipping - see prior debug sessions.
+
+// Is this pixel printed ink, as opposed to the label's pastel hologram
+// background? The background stays colorful even in its darker patches,
+// while printed text is a desaturated near-black. Plain grayscale
+// darkness can't tell those apart (verified: a pure luminance threshold
+// flagged ~20-25% of the whole label as "ink"); requiring BOTH low
+// value AND low saturation (HSV) cuts that down to roughly what the
+// actual text covers.
+function isInkPixelHSV(r, g, b) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const value = max;
+  const sat = max === 0 ? 0 : ((max - min) / max) * 255;
+  return value < 90 && sat < 90;
 }
 
-// Debug aid: draws the FULL "guide frame" image (shrunk to a manageable
-// width) with a red rectangle marking exactly where boxToPixelRect()
-// resolved Gemini's box to. If the rectangle lands somewhere with no text
-// at all, the bug is in the coordinates themselves (scale/axis-order
-// mismatch, or Gemini's box not actually matching that image) rather than
-// in the crop/threshold/geometry logic downstream of it.
-async function renderBoxOverlay(sourceDataUrl, box) {
+function buildInkMask(ctx, width, height) {
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const mask = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    mask[p] = isInkPixelHSV(data[i], data[i + 1], data[i + 2]) ? 1 : 0;
+  }
+  return mask;
+}
+
+// Row-projection line detection. This label stock always prints the key
+// as 2 groups / 2 groups / 1 group across exactly 3 lines (matches the
+// on-screen guide the operator aims at), so we keep the 3 tallest ink
+// bands and assume they ARE those 3 lines, top to bottom.
+function findLineBands(mask, width, height) {
+  const rowThresh = Math.max(3, width * 0.01);
+  const bands = [];
+  let inBand = false, start = 0;
+  for (let y = 0; y < height; y++) {
+    let count = 0;
+    const rowStart = y * width;
+    for (let x = 0; x < width; x++) count += mask[rowStart + x];
+    if (count > rowThresh && !inBand) { inBand = true; start = y; }
+    else if (count <= rowThresh && inBand) {
+      inBand = false;
+      if (y - start > height * 0.05) bands.push([start, y]);
+    }
+  }
+  if (inBand && height - start > height * 0.05) bands.push([start, height]);
+  const top3 = bands.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 3);
+  return top3.sort((a, b) => a[0] - b[0]);
+}
+
+// Column-projection character detection within one line band. Blobs
+// narrower than half the median blob width are dropped - that's how the
+// small "*" separator dot between groups gets filtered out without
+// needing to special-case it.
+function findCharBlobs(mask, width, y0, y1) {
+  const colThresh = 1;
+  const raw = [];
+  let inBlob = false, start = 0;
+  for (let x = 0; x < width; x++) {
+    let count = 0;
+    for (let y = y0; y < y1; y++) count += mask[y * width + x];
+    if (count > colThresh && !inBlob) { inBlob = true; start = x; }
+    else if (count <= colThresh && inBlob) {
+      inBlob = false;
+      if (x - start > 6) raw.push([start, x]);
+    }
+  }
+  if (inBlob) raw.push([start, width]);
+  if (!raw.length) return [];
+  const widths = raw.map(b => b[1] - b[0]).sort((a, b) => a - b);
+  const medianW = widths[Math.floor(widths.length / 2)];
+  return raw.filter(b => (b[1] - b[0]) >= medianW * 0.5);
+}
+
+// Full pipeline: segments the "guide frame" image into 25 per-character
+// pixel rects in reading order, using this label's fixed 3-line layout
+// (groups 1-2 / groups 3-4 / group 5). Returns null if segmentation
+// doesn't land on the expected blob counts (10, 10, 5) - a bad photo or
+// an unexpected label layout should fall back to manual review rather
+// than silently hand back nonsense rects.
+async function segmentKeyCharacters(sourceDataUrl) {
+  const img = await dataUrlToImage(sourceDataUrl);
+  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const mask = buildInkMask(ctx, W, H);
+
+  const bands = findLineBands(mask, W, H);
+  if (bands.length !== 3) return null;
+
+  const expectedCounts = [10, 10, 5];
+  const rects = [];
+  for (let i = 0; i < 3; i++) {
+    const [y0, y1] = bands[i];
+    const blobs = findCharBlobs(mask, W, y0, y1);
+    if (blobs.length !== expectedCounts[i]) return null;
+    for (const [x0, x1] of blobs) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+  }
+  return rects; // length 25, reading order, index 0 = character 1
+}
+
+// Debug aid: draws the FULL "guide frame" image (shrunk) with a red
+// rectangle marking exactly which pixel rect was used, so a bad
+// segmentation is visible at a glance instead of having to trust the
+// numbers.
+async function renderRectOverlay(sourceDataUrl, rect) {
   try {
     const img = await dataUrlToImage(sourceDataUrl);
     const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
@@ -1471,90 +1571,105 @@ async function renderBoxOverlay(sourceDataUrl, box) {
     canvas.height = Math.round(H * scale);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-    const rect = boxToPixelRect(box, W, H, 0); // no padding here - show the RAW box, not the padded crop
     ctx.strokeStyle = '#ff2d55';
     ctx.lineWidth = 2;
     ctx.strokeRect(rect.x * scale, rect.y * scale, rect.w * scale, rect.h * scale);
-
     return canvas.toDataURL('image/jpeg', 0.85);
   } catch {
     return null;
   }
 }
 
-async function cropGlyphCanvas(sourceDataUrl, box, targetH = 160) {
+async function cropRectCanvas(sourceDataUrl, rect, targetH = 200) {
   const img = await dataUrlToImage(sourceDataUrl);
-  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
-  const rect = boxToPixelRect(box, W, H);
-  if (rect.w < 3 || rect.h < 3) return null;
-  const scale = targetH / rect.h;
+  const padX = rect.w * 0.15, padY = rect.h * 0.15;
+  const x0 = Math.max(0, rect.x - padX), y0 = Math.max(0, rect.y - padY);
+  const x1 = rect.x + rect.w + padX, y1 = rect.y + rect.h + padY;
+  const cw = x1 - x0, ch = y1 - y0;
+  if (cw < 3 || ch < 3) return null;
+  const scale = targetH / ch;
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(rect.w * scale));
+  canvas.width = Math.max(1, Math.round(cw * scale));
   canvas.height = targetH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, x0, y0, cw, ch, 0, 0, canvas.width, canvas.height);
   return { canvas, ctx };
 }
 
-// Deterministic geometry check, no API call: crops just the one glyph
-// Gemini pointed at, binarizes it, and counts how many separate ink
-// clusters appear per row across the LOWER half of the character.
-// V's two diagonal arms are still separate strokes through most of the
-// lower half (2 clusters); Y's stem is a single continuous stroke there
-// (1 cluster). This is the same kind of per-character geometric test a
-// license-plate reader uses instead of re-asking an LLM to eyeball it.
-// Returns { result, avg, rawDataUrl, binDataUrl } - result is 'V'/'Y'/null
-// (null = signal too weak/noisy to trust: bad crop, dirt, blur). The two
-// data URLs are always returned when a crop was possible, so callers can
-// SHOW what was actually analyzed instead of guessing blind.
-async function classifyVorYFromBox(sourceDataUrl, box) {
-  const empty = { result: null, avg: null, rawDataUrl: null, binDataUrl: null };
+// Deterministic geometry check, no API call: given the character's own
+// pixel rect (from segmentKeyCharacters), crops it, builds the same
+// HSV ink mask, and counts ink clusters per row across the LOWER portion
+// of the GLYPH'S OWN ink extent (not the padded crop box - the crop has
+// blank margin around the glyph that would otherwise throw off the
+// percentages). V's two diagonal strokes stay separate through most of
+// that range (2 clusters); Y's stem is one continuous stroke there
+// (1 cluster). Band and thresholds (60%-90% of glyph height, decide by
+// MEDIAN not mean) were tuned against an actual photographed character
+// from this label stock, where the fork on this font's "Y" turned out to
+// extend much lower than a generic assumption would guess, and a single
+// noisy row was enough to throw off a mean.
+async function classifyVorYFromRect(sourceDataUrl, rect) {
+  const empty = { result: null, rawDataUrl: null, binDataUrl: null };
   try {
-    const cropped = await cropGlyphCanvas(sourceDataUrl, box, 160);
+    const cropped = await cropRectCanvas(sourceDataUrl, rect, 200);
     if (!cropped) return empty;
     const { canvas, ctx } = cropped;
     const rawDataUrl = canvas.toDataURL('image/png');
-    enhanceForOcr(ctx, canvas.width, canvas.height, 'threshold');
-    const binDataUrl = canvas.toDataURL('image/png');
-    const { width, height, data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height;
+    const mask = buildInkMask(ctx, w, h);
 
-    const bandTop = Math.round(height * 0.40);
-    const bandBottom = Math.round(height * 0.85);
-    const step = Math.max(1, Math.round((bandBottom - bandTop) / 10));
-    const rowClusterCounts = [];
-    for (let y = bandTop; y <= bandBottom; y += step) {
+    const binImageData = ctx.createImageData(w, h);
+    for (let p = 0; p < mask.length; p++) {
+      const v = mask[p] ? 0 : 255;
+      binImageData.data[p * 4] = v; binImageData.data[p * 4 + 1] = v;
+      binImageData.data[p * 4 + 2] = v; binImageData.data[p * 4 + 3] = 255;
+    }
+    ctx.putImageData(binImageData, 0, 0);
+    const binDataUrl = canvas.toDataURL('image/png');
+
+    let gy0 = -1, gy1 = -1;
+    for (let y = 0; y < h; y++) {
+      let any = false;
+      for (let x = 0; x < w; x++) { if (mask[y * w + x]) { any = true; break; } }
+      if (any) { if (gy0 === -1) gy0 = y; gy1 = y; }
+    }
+    if (gy0 === -1) return { result: null, rawDataUrl, binDataUrl };
+    const gh = gy1 - gy0 + 1;
+    const bandTop = gy0 + Math.round(gh * 0.60);
+    const bandBottom = gy0 + Math.round(gh * 0.90);
+
+    const counts = [];
+    for (let y = bandTop; y <= bandBottom; y++) {
       let clusters = 0, wasInk = false;
-      for (let x = 0; x < width; x++) {
-        const isInk = data[(y * width + x) * 4] < 128; // binarized: near-0 = ink
+      for (let x = 0; x < w; x++) {
+        const isInk = !!mask[y * w + x];
         if (isInk && !wasInk) clusters++;
         wasInk = isInk;
       }
-      if (clusters > 0) rowClusterCounts.push(clusters);
+      if (clusters > 0) counts.push(clusters);
     }
-    if (rowClusterCounts.length < 3) return { result: null, avg: null, rawDataUrl, binDataUrl };
+    if (counts.length < 5) return { result: null, rawDataUrl, binDataUrl };
 
-    const avg = rowClusterCounts.reduce((a, b) => a + b, 0) / rowClusterCounts.length;
+    counts.sort((a, b) => a - b);
+    const median = counts[Math.floor(counts.length / 2)];
     let result = null;
-    if (avg <= 1.25) result = 'Y'; // one continuous stem
-    else if (avg >= 1.75) result = 'V'; // two separate diagonal strokes
-    return { result, avg, rawDataUrl, binDataUrl };
+    if (median <= 1) result = 'Y';
+    else if (median >= 2) result = 'V';
+    return { result, rawDataUrl, binDataUrl };
   } catch {
     return empty;
   }
 }
 
-// Fallback when geometry is inconclusive: ask Gemini again, but ONLY about
-// this one already-cropped, already-zoomed character, as a strict binary
-// choice. This is a much easier task than reading all 25 characters at
-// once and is far more reliable for the specific V/Y case - still fully
-// automated, no operator involved. Also returns the exact crop sent, so
-// it's visible in the debug panel what the model was actually shown.
-async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
+// Fallback when geometry is inconclusive: ask Gemini again, but ONLY
+// about this one already-cropped, already-zoomed character, as a strict
+// binary choice. Much easier task than reading all 25 at once - still
+// fully automated, no operator involved.
+async function verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect) {
   const empty = { result: null, cropDataUrl: null };
-  const cropped = await cropGlyphCanvas(sourceDataUrl, box, 200);
+  const cropped = await cropRectCanvas(sourceDataUrl, rect, 200);
   if (!cropped) return empty;
   const jpegUrl = cropped.canvas.toDataURL('image/jpeg', 0.92);
   const base64 = jpegUrl.split(',')[1];
@@ -1580,7 +1695,7 @@ async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
         })
       }
     );
-    incrementApiUsage(); // this call reached Google and counts against real quota
+    incrementApiUsage();
     if (!res.ok) return { result: null, cropDataUrl: jpegUrl };
     const data = await res.json();
     const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
@@ -1591,71 +1706,75 @@ async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
   }
 }
 
-// Orchestrates automatic resolution of every V/Y Gemini flagged in the
-// first pass: geometry check first (instant, free), focused re-query as
-// fallback (costs one extra API call, only when geometry can't decide).
-// Only characters neither method can resolve end up in `stillUnresolved` -
-// that list should be rare, and is the only thing that still surfaces a
+// Orchestrates automatic resolution of every V/Y found in the OCR'd key:
+// locate each one ourselves via segmentKeyCharacters() (no Gemini
+// involved), geometry check first (instant, free), focused re-query as
+// fallback (one extra API call, only when geometry can't decide). Only
+// characters neither method can resolve end up in `stillUnresolved` -
+// that should be rare, and is the only thing that still surfaces a
 // manual-review prompt in the UI. `debugItems` carries everything needed
-// to visually inspect what happened at each position (crop images,
-// cluster-count average, which method decided, final letter).
-async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) {
+// to visually inspect what happened (rect overlay, crop, which method
+// decided, final letter).
+async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
   const chars = key.replace(/-/g, '').split('');
   const resolutionLog = [];
   const stillUnresolved = [];
-  const coveredPositions = new Set();
   const debugItems = [];
 
-  for (const item of (ambiguousList || [])) {
-    const pos = Number(item?.index) - 1;
-    if (!Number.isInteger(pos) || pos < 0 || pos >= chars.length) continue;
-    if (!/^[VY]$/.test(chars[pos])) continue; // sanity: position must actually hold V or Y
-    coveredPositions.add(pos + 1);
-    const originalChar = chars[pos];
+  const ambiguousPositions = findAmbiguousKeyPositions(key);
+  if (!ambiguousPositions.length) {
+    return { resolvedKey: key, resolutionLog, stillUnresolved, debugItems };
+  }
 
-    if (!Array.isArray(item.box) || item.box.length !== 4) {
-      stillUnresolved.push({ position: pos + 1, char: originalChar });
-      debugItems.push({ position: pos + 1, original: originalChar, method: 'Gemini 沒有回傳座標 (no box)', final: originalChar });
+  const rects = await segmentKeyCharacters(sourceDataUrl);
+
+  for (const hit of ambiguousPositions) {
+    const pos = hit.position - 1;
+    const originalChar = chars[pos];
+    const rect = rects ? rects[pos] : null;
+
+    if (!rect) {
+      stillUnresolved.push({ position: hit.position, char: originalChar });
+      debugItems.push({
+        position: hit.position, original: originalChar, final: originalChar,
+        method: '本地字元分割失敗（找不到預期的行數/字元數），需人工核對'
+      });
       continue;
     }
 
-    // Always render where the box actually resolved to on the full image -
-    // this is checked BEFORE trusting any downstream crop/geometry result,
-    // since a misaligned box makes everything after it meaningless.
-    const overlayDataUrl = await renderBoxOverlay(sourceDataUrl, item.box);
-    const boxLabel = `box=[${item.box.map(n => Math.round(n)).join(',')}]`;
+    const overlayDataUrl = await renderRectOverlay(sourceDataUrl, rect);
 
-    const geo = await classifyVorYFromBox(sourceDataUrl, item.box);
+    const geo = await classifyVorYFromRect(sourceDataUrl, rect);
     if (geo.result) {
       resolutionLog.push(geo.result === originalChar
-        ? `第${pos + 1}碼 幾何比對：確認為 ${geo.result}`
-        : `第${pos + 1}碼 幾何比對：${originalChar} → ${geo.result}`);
+        ? `第${hit.position}碼 幾何比對：確認為 ${geo.result}`
+        : `第${hit.position}碼 幾何比對：${originalChar} → ${geo.result}`);
       chars[pos] = geo.result;
       debugItems.push({
-        position: pos + 1, original: originalChar, final: geo.result, method: `幾何比對 (avg=${geo.avg?.toFixed(2)}, ${boxLabel})`,
+        position: hit.position, original: originalChar, final: geo.result, method: '幾何比對（本地字元分割，非 AI 座標）',
         overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl
       });
       continue;
     }
 
-    const api = await verifyCharWithGeminiCrop(apiKey, sourceDataUrl, item.box);
+    const api = await verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect);
     if (api.result) {
       resolutionLog.push(api.result === originalChar
-        ? `第${pos + 1}碼 聚焦二次辨識：確認為 ${api.result}`
-        : `第${pos + 1}碼 聚焦二次辨識：${originalChar} → ${api.result}`);
+        ? `第${hit.position}碼 聚焦二次辨識：確認為 ${api.result}`
+        : `第${hit.position}碼 聚焦二次辨識：${originalChar} → ${api.result}`);
       chars[pos] = api.result;
       debugItems.push({
-        position: pos + 1, original: originalChar, final: api.result,
-        method: `幾何無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})，改用聚焦二次辨識 (${boxLabel})`,
+        position: hit.position, original: originalChar, final: api.result,
+        method: '幾何無法判斷，改用聚焦二次辨識',
         overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
       });
       continue;
     }
 
-    stillUnresolved.push({ position: pos + 1, char: originalChar });
+    stillUnresolved.push({ position: hit.position, char: originalChar });
     debugItems.push({
-      position: pos + 1, original: originalChar, final: originalChar,
-      method: `兩種方法都無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'}, ${boxLabel})`,
+      position: hit.position, original: originalChar, final: originalChar,
+      method: '兩種方法都無法判斷',
       overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
     });
   }
@@ -1664,7 +1783,6 @@ async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) 
     resolvedKey: chars.join('').match(/.{1,5}/g).join('-'),
     resolutionLog,
     stillUnresolved,
-    coveredPositions,
     debugItems
   };
 }
@@ -1715,9 +1833,8 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
     'These character pairs are easy to confuse in print - look closely at each one before deciding: E vs F (E has 3 horizontal strokes, F has only 2 - no bottom stroke), 0 vs O, 1 vs I, 5 vs S, 8 vs B, 6 vs G. Do not default to the more common-looking letter; read the actual strokes present.',
     'V vs Y is especially easy to misread on this label stock: V is two straight diagonal strokes meeting at a single point at the BOTTOM, with an open top (like a checkmark shape, no vertical stem). Y has a fork/V-shape only at the TOP that merges into one straight vertical stroke going down to the bottom edge of the character. If the shape has any straight vertical segment in its lower half, it is Y, not V. Zoom in mentally on each occurrence of V or Y and check specifically for that lower vertical stem before deciding.',
-    'For every V or Y character in the key, also report its bounding box so it can be double-checked automatically: add a field "ambiguous", an array with one object per V/Y character, each {"index": N, "char": "V or Y", "box": [ymin,xmin,ymax,xmax]}. "index" is that character\'s 1-based position counting only letters/digits in the key, ignoring dashes (so the first character of the first group is index 1, the first character of the second group is index 6, etc). "box" is 4 integers 0-1000, normalized to the width/height of the FIRST image you were given (labeled "guide frame - color"), tightly bounding just that single character - not the whole group. If the key has no V or Y, return "ambiguous": [].',
     'Return strict JSON only:',
-    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short","ambiguous":[]}',
+    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
     'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
     'Never return the placeholder XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.',
     'Do not use OCR guesses from other image variants as evidence; read the photo directly.',
