@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">TEST2</div>
+      <div class="version-badge" id="app-version">TEST3</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -856,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'TEST2';
+const APP_VERSION = 'TEST3';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1454,6 +1454,35 @@ function boxToPixelRect(box, W, H, padFrac = 0.15) {
   return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
 }
 
+// Debug aid: draws the FULL "guide frame" image (shrunk to a manageable
+// width) with a red rectangle marking exactly where boxToPixelRect()
+// resolved Gemini's box to. If the rectangle lands somewhere with no text
+// at all, the bug is in the coordinates themselves (scale/axis-order
+// mismatch, or Gemini's box not actually matching that image) rather than
+// in the crop/threshold/geometry logic downstream of it.
+async function renderBoxOverlay(sourceDataUrl, box) {
+  try {
+    const img = await dataUrlToImage(sourceDataUrl);
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const displayW = 360;
+    const scale = displayW / W;
+    const canvas = document.createElement('canvas');
+    canvas.width = displayW;
+    canvas.height = Math.round(H * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const rect = boxToPixelRect(box, W, H, 0); // no padding here - show the RAW box, not the padded crop
+    ctx.strokeStyle = '#ff2d55';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(rect.x * scale, rect.y * scale, rect.w * scale, rect.h * scale);
+
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch {
+    return null;
+  }
+}
+
 async function cropGlyphCanvas(sourceDataUrl, box, targetH = 160) {
   const img = await dataUrlToImage(sourceDataUrl);
   const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
@@ -1586,9 +1615,15 @@ async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) 
 
     if (!Array.isArray(item.box) || item.box.length !== 4) {
       stillUnresolved.push({ position: pos + 1, char: originalChar });
-      debugItems.push({ position: pos + 1, original: originalChar, method: 'no box from Gemini', final: originalChar });
+      debugItems.push({ position: pos + 1, original: originalChar, method: 'Gemini 沒有回傳座標 (no box)', final: originalChar });
       continue;
     }
+
+    // Always render where the box actually resolved to on the full image -
+    // this is checked BEFORE trusting any downstream crop/geometry result,
+    // since a misaligned box makes everything after it meaningless.
+    const overlayDataUrl = await renderBoxOverlay(sourceDataUrl, item.box);
+    const boxLabel = `box=[${item.box.map(n => Math.round(n)).join(',')}]`;
 
     const geo = await classifyVorYFromBox(sourceDataUrl, item.box);
     if (geo.result) {
@@ -1597,8 +1632,8 @@ async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) 
         : `第${pos + 1}碼 幾何比對：${originalChar} → ${geo.result}`);
       chars[pos] = geo.result;
       debugItems.push({
-        position: pos + 1, original: originalChar, final: geo.result, method: `幾何比對 (avg=${geo.avg?.toFixed(2)})`,
-        rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl
+        position: pos + 1, original: originalChar, final: geo.result, method: `幾何比對 (avg=${geo.avg?.toFixed(2)}, ${boxLabel})`,
+        overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl
       });
       continue;
     }
@@ -1611,8 +1646,8 @@ async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) 
       chars[pos] = api.result;
       debugItems.push({
         position: pos + 1, original: originalChar, final: api.result,
-        method: `幾何無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})，改用聚焦二次辨識`,
-        rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
+        method: `幾何無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})，改用聚焦二次辨識 (${boxLabel})`,
+        overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
       });
       continue;
     }
@@ -1620,8 +1655,8 @@ async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) 
     stillUnresolved.push({ position: pos + 1, char: originalChar });
     debugItems.push({
       position: pos + 1, original: originalChar, final: originalChar,
-      method: `兩種方法都無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})`,
-      rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
+      method: `兩種方法都無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'}, ${boxLabel})`,
+      overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
     });
   }
 
@@ -1652,9 +1687,13 @@ function renderVyDebug(debugItems) {
   const thumb = (src, label) => src
     ? `<div style="text-align:center;"><img src="${src}" style="height:60px; image-rendering:pixelated; border:1px solid var(--border); border-radius:4px; background:#fff;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">${label}</div></div>`
     : '';
+  const overlayThumb = (src) => src
+    ? `<div style="text-align:center; margin-bottom:6px;"><img src="${src}" style="width:100%; max-width:300px; border:1px solid var(--border); border-radius:4px;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">紅框＝程式算出的裁切位置（在完整送出圖上標示）</div></div>`
+    : '';
   box.innerHTML = debugItems.map(item => `
-    <div style="display:flex; flex-direction:column; gap:4px; padding:8px; border:1px solid var(--border); border-radius:8px; min-width:150px;">
+    <div style="display:flex; flex-direction:column; gap:4px; padding:8px; border:1px solid var(--border); border-radius:8px; min-width:150px; width:100%;">
       <div style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--accent);">第${item.position}碼：${item.original} → ${item.final}</div>
+      ${overlayThumb(item.overlayDataUrl)}
       <div style="display:flex; gap:6px;">
         ${thumb(item.rawDataUrl, '原始裁切')}
         ${thumb(item.binDataUrl, '二值化')}
