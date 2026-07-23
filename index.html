@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">TEST5</div>
+      <div class="version-badge" id="app-version">test6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -856,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'TEST5';
+const APP_VERSION = 'test6';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -2376,16 +2376,14 @@ validateKey = function(key) {
       hint.textContent = `⚠ 含有金鑰不會出現的字元（${badChars.join('、')}），請再確認`;
       hint.style.color = 'var(--warn)';
       btn.disabled = false; // still allow override - operator may know better than the checker
-    } else if (keyInputVerified) {
-      hint.textContent = ambiguousHits.length ? '已標示待核對字元，確認無誤即可送出' : '格式正確 (25碼)';
-      hint.style.color = ambiguousHits.length ? 'var(--warn)' : 'var(--success)';
-      btn.disabled = false;
-    } else {
-      hint.textContent = ambiguousHits.length
-        ? '偵測到易混淆字元，核對下方提示後再產生 QR'
-        : 'OCR 候選碼，請核對後修改任一字再產生 QR';
+    } else if (ambiguousHits.length) {
+      hint.textContent = '偵測到易混淆字元，若已核對無誤可直接送出';
       hint.style.color = 'var(--warn)';
-      btn.disabled = true;
+      btn.disabled = false; // warn, but never force an edit before allowing submit
+    } else {
+      hint.textContent = '格式正確 (25碼)';
+      hint.style.color = 'var(--success)';
+      btn.disabled = false;
     }
   } else {
     ambiguousHint.style.display = 'none';
