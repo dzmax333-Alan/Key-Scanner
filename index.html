@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.7</div>
+      <div class="version-badge" id="app-version">V3.8</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -812,11 +812,9 @@ XXXXX"
       oninput="formatKeyInput(this)"
     ></textarea>
 
-    <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:12px; color:var(--muted);"></div>
+    <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:6px; color:var(--muted);"></div>
 
-    <button class="btn btn-secondary" id="btn-confirm-asis" onclick="confirmAsIs()" style="display:none; margin-bottom:12px;">
-      👁 我已核對，結果正確
-    </button>
+    <div id="key-ambiguous-hint" style="display:none; font-size:11px; line-height:1.5; font-family:'Share Tech Mono',monospace; margin-bottom:12px; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,214,10,0.4); background:rgba(255,214,10,0.08); color:var(--warn);"></div>
 
     <button class="btn btn-success" id="btn-gen-qr" onclick="generateQR()">
       ✅ 確認，產生 QR Code
@@ -853,7 +851,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.7';
+const APP_VERSION = 'V3.8';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1310,19 +1308,6 @@ async function processImageV2(dataUrl, containerAspect) {
     candidateKey = key;
     ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
 
-    // Positions Gemini itself flagged as not-fully-certain (see prompt's
-    // uncertain_positions field). This is what lets us auto-generate the QR
-    // for the easy/confident cases while still catching the hard ones
-    // (like V/Y) instead of either trusting every read blindly or making
-    // the operator proofread all 25 characters on every single unit.
-    const compactForFlags = key ? key.replace(/-/g, '') : '';
-    const uncertainPositions = Array.isArray(result.uncertain_positions)
-      ? [...new Set(result.uncertain_positions)].filter(p => Number.isInteger(p) && p >= 1 && p <= 25)
-      : [];
-    const uncertainChars = uncertainPositions
-      .map(p => compactForFlags[p - 1])
-      .filter(Boolean);
-
     progressEl.style.width = '100%';
     document.getElementById('ocr-raw').textContent = [
       rawText,
@@ -1330,23 +1315,14 @@ async function processImageV2(dataUrl, containerAspect) {
       `OCR: ${ocrResult.model}`,
       ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
       eToFCount ? `Auto-corrected: E→F ×${eToFCount}` : '',
-      uncertainPositions.length ? `Uncertain positions: ${uncertainPositions.map((p, idx) => `#${p}(${uncertainChars[idx] || '?'})`).join(', ')}` : '',
       key ? `Detected: ${key}` : (candidateKey ? `Candidate: ${candidateKey}` : 'Detected: NOT_FOUND')
     ].filter(Boolean).join('\n');
 
     if (key) {
       const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
       const badChars = findInvalidKeyChars(key);
-      if (uncertainPositions.length) {
-        // Gemini told us directly it wasn't sure about specific characters
-        // (typically a V/Y or similar confusable pair) - this is a more
-        // targeted signal than overall confidence %, so it always forces a
-        // manual look even when "skip confirm" is on, but tells the
-        // operator exactly which character(s) to check instead of making
-        // them re-verify the whole string.
-        setOcrStatus('warning', `⚠ 第 ${uncertainPositions.join('、')} 碼不太確定（${uncertainChars.join('、')}），常見於 V/Y 混淆，請核對後再產生 QR`);
-        showConfirm(key, { verified: false });
-      } else if (badChars.length) {
+      const ambiguousHits = findAmbiguousKeyPositions(key);
+      if (badChars.length) {
         // These characters are documented (and code-verified via Microsoft's
         // own key-decoding algorithm - base24 = BCDFGHJKMPQRTVWXY2346789) to
         // never appear in a real Windows product key. If Gemini returns one,
@@ -1356,15 +1332,22 @@ async function processImageV2(dataUrl, containerAspect) {
         // legitimate special-case appearance in "N edition" keys and we've
         // observed it in genuine keys from this label stock.
         setOcrStatus('warning', `⚠ 偵測到不可能出現在金鑰裡的字元（${badChars.join('、')}），可能誤判，請仔細核對`);
-        showConfirm(key, { verified: false });
+        showConfirm(key, { verified: false, ambiguousHits });
       } else if (lowConfidence) {
         setOcrStatus('warning', `${ocrResult.model} 信心值偏低 (${Math.round(ocrResult.confidence)}%)，請仔細核對每個字元，必要時重拍`);
-        showConfirm(key, { verified: false }); // force manual double-check even if "skip confirm" is on
+        showConfirm(key, { verified: false, ambiguousHits }); // force manual double-check even if "skip confirm" is on
+      } else if (ambiguousHits.length) {
+        // V and Y are both individually valid characters, so a wrong pick
+        // won't trip findInvalidKeyChars() above. Force manual review just
+        // for these positions rather than skipping straight to the QR.
+        const positions = ambiguousHits.map(h => `第${h.position}碼(${h.char})`).join('、');
+        setOcrStatus('warning', `⚠ ${positions} 為易混淆字元，請放大核對後再產生 QR`);
+        showConfirm(key, { verified: false, ambiguousHits });
       } else if (shouldSkipConfirm()) {
         generateQRForKey(key);
       } else {
         setOcrStatus('success', `${ocrResult.model} found a possible product key.`);
-        showConfirm(key, { verified: true });
+        showConfirm(key, { verified: true, ambiguousHits });
       }
     } else {
       setOcrStatus('warning', 'Gemini did not return a complete key. Please edit manually.');
@@ -1407,6 +1390,27 @@ function findInvalidKeyChars(key) {
   return [...new Set([...clean].filter(ch => INVALID_KEY_CHARS.has(ch)))];
 }
 
+// Characters that are both individually valid (appear in the base24 key
+// alphabet) but get visually confused with each other on this label stock,
+// so a wrong pick won't get caught by findInvalidKeyChars(). Unlike E->F,
+// there's no safe auto-correct here since either letter could be genuinely
+// correct - instead we flag WHERE (1-indexed position within the 25-char
+// key, ignoring dashes) they occur so a human can zoom in on just those
+// characters instead of re-checking all 25.
+const AMBIGUOUS_KEY_PAIRS = { V: 'V/Y', Y: 'V/Y' };
+
+function findAmbiguousKeyPositions(key) {
+  const clean = String(key || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const hits = [];
+  for (let i = 0; i < clean.length; i++) {
+    const ch = clean[i];
+    if (AMBIGUOUS_KEY_PAIRS[ch]) {
+      hits.push({ position: i + 1, char: ch, pair: AMBIGUOUS_KEY_PAIRS[ch] });
+    }
+  }
+  return hits;
+}
+
 const CONFIDENCE_RETAKE_THRESHOLD = 60;
 
 async function readWindowsKeyWithGemini(apiKey, images) {
@@ -1416,14 +1420,13 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Anchor strategy: first locate the text "howtotell.com" printed on the label. The product key is printed directly beside or below it, next to a small key icon (🔑) and a small empty square checkbox.',
     'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
     'These character pairs are easy to confuse in print - look closely at each one before deciding: E vs F (E has 3 horizontal strokes, F has only 2 - no bottom stroke), 0 vs O, 1 vs I, 5 vs S, 8 vs B, 6 vs G. Do not default to the more common-looking letter; read the actual strokes present.',
-    'V vs Y is a specific, frequent failure mode on this label stock - check it as carefully as E vs F: V is exactly two diagonal strokes meeting at a single point at the bottom, with nothing below that point (a clean "V" notch). Y is two diagonal strokes meeting in the middle, PLUS an additional short straight stroke that continues straight down from that meeting point to the character\'s baseline (a stem below the notch). Before deciding V or Y, explicitly look for whether that extra downward stem exists below the meeting point - do not decide by overall shape impression or by what "looks more common," decide only by whether the stem is present.',
-    'You may receive more than one image of the same crop: a full-color version and a black-and-white high-contrast version with the colorful background pattern digitally removed. The black-and-white version exists specifically to make faint strokes (like the Y stem above) easier to see through the background pattern. Cross-check the character strokes across all provided variants and agree on one answer; if variants disagree, trust the one where the stroke shapes are most unambiguous, and lower your confidence and flag that position in uncertain_positions.',
+    'V vs Y is especially easy to misread on this label stock: V is two straight diagonal strokes meeting at a single point at the BOTTOM, with an open top (like a checkmark shape, no vertical stem). Y has a fork/V-shape only at the TOP that merges into one straight vertical stroke going down to the bottom edge of the character. If the shape has any straight vertical segment in its lower half, it is Y, not V. Zoom in mentally on each occurrence of V or Y and check specifically for that lower vertical stem before deciding.',
     'Return strict JSON only:',
-    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"uncertain_positions":[],"notes":"short"}',
-    'uncertain_positions is an array of 1-based character positions (1 to 25, counting only the letters/digits and ignoring dashes) that you are genuinely not fully certain about - especially any position decided between V/Y, E/F, 0/O, 1/I, 5/S, 8/B, or 6/G where the stroke evidence was not perfectly clean. Leave it as [] only if you are confident in every single character.',
-    'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"uncertain_positions":[],"notes":"why"}.',
+    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
+    'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
     'Never return the placeholder XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.',
-    'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2, V/Y. Do not invent missing characters.',
+    'Do not use OCR guesses from other image variants as evidence; read the photo directly.',
+    'Common confusions: O/0, I/1, S/5, B/8, G/6, Z/2. Do not invent missing characters.',
     'Example from this label style: YH9MB-GTNPG-CJG29-RQJ4R-MWV23'
   ].join('\n');
 
@@ -1449,7 +1452,7 @@ async function readWindowsKeyWithGemini(apiKey, images) {
           contents: [{ parts }],
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 220,
+            maxOutputTokens: 120,
             responseMimeType: 'application/json'
           }
         })
@@ -1665,17 +1668,6 @@ async function prepareKeyImages(dataUrl, containerAspect) {
   // Upscaling a close-up shot just interpolates/blurs without adding real
   // detail, and makes the payload bigger for no benefit.
   addVariant('guide frame - color', guideBand, { scale: 1.0, quality: 0.92, binarize: false });
-  // 2026-07 V/Y fix: re-introduce a binarized variant of the SAME crop,
-  // sent alongside the color one (not instead of it). The colorful
-  // anti-counterfeit mosaic background sits right behind the last few
-  // characters on this label stock and was suspected of interfering with
-  // stroke-shape judgment for V-vs-Y specifically (both letters differ
-  // only in whether a short vertical stroke continues below the meeting
-  // point - exactly where the mosaic's fine detail competes for pixels).
-  // Thresholding removes that background and leaves pure black strokes on
-  // white, so Gemini gets both a full-detail and a stroke-only view of the
-  // same characters and can cross-check them against each other.
-  addVariant('guide frame - binarized (background pattern removed)', guideBand, { scale: 1.0, quality: 0.92, binarize: true });
   addVariant('full label reference', { x: 0, y: 0, w, h }, { scale: 1.0, quality: 0.85, binarize: false });
   return variants;
 }
@@ -1730,43 +1722,10 @@ function clampRect(rect, maxW, maxH) {
 function enhanceForOcr(ctx, width, height, mode = 'threshold') {
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
-  const n = width * height;
-
-  // Build a grayscale histogram first, then pick the threshold with Otsu's
-  // method instead of a hardcoded constant. A fixed threshold (the old
-  // code used 165) only works for the lighting conditions it was tuned
-  // under - this label's colorful anti-counterfeit mosaic sits at very
-  // different brightness levels depending on ambient light, camera flash,
-  // and shadow, so a fixed cut point either eats into thin letter strokes
-  // (V/Y's connecting diagonal) or fails to remove the mosaic. Otsu's
-  // method picks, per-photo, the threshold that best separates the image
-  // into two brightness clusters (ink vs background), which adapts
-  // automatically to whatever lighting that particular shot has.
-  const hist = new Uint32Array(256);
-  const gray = new Uint8ClampedArray(n);
-  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    gray[p] = g;
-    hist[g | 0]++;
-  }
-
-  let sumAll = 0;
-  for (let t = 0; t < 256; t++) sumAll += t * hist[t];
-  let sumB = 0, wB = 0, maxVar = 0, threshold = 165; // 165 kept only as a fallback
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = n - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sumAll - sumB) / wF;
-    const between = wB * wF * (mB - mF) * (mB - mF);
-    if (between > maxVar) { maxVar = between; threshold = t; }
-  }
-
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    const bw = gray[p] < threshold ? 0 : 255;
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const contrast = Math.max(0, Math.min(255, (gray - 128) * 2.1 + 128));
+    const bw = contrast < 165 ? 0 : 255;
     const value = mode === 'invert' ? 255 - bw : bw;
     data[i] = data[i + 1] = data[i + 2] = value;
   }
@@ -1922,44 +1881,43 @@ function validateKey(key) {
 // ─── QR Code ──────────────────────────────────────────────
 validateKey = function(key) {
   const hint = document.getElementById('key-valid-hint');
+  const ambiguousHint = document.getElementById('key-ambiguous-hint');
   const btn = document.getElementById('btn-gen-qr');
-  const asisBtn = document.getElementById('btn-confirm-asis');
   const clean = key.replace(/[^A-Za-z0-9]/g, '');
   if (clean.length === 25) {
     const badChars = findInvalidKeyChars(clean);
+    // Recomputed live (not from the original OCR result) so the hint stays
+    // accurate as the operator edits characters in place.
+    const ambiguousHits = findAmbiguousKeyPositions(clean);
+    if (ambiguousHits.length) {
+      const positions = ambiguousHits.map(h => `第${h.position}碼「${h.char}」`).join('、');
+      ambiguousHint.textContent = `🔍 請放大原圖核對：${positions}（V 底部尖角無直立筆畫／Y 下方有一條直立筆畫）`;
+      ambiguousHint.style.display = 'block';
+    } else {
+      ambiguousHint.style.display = 'none';
+    }
     if (badChars.length) {
       hint.textContent = `⚠ 含有金鑰不會出現的字元（${badChars.join('、')}），請再確認`;
       hint.style.color = 'var(--warn)';
       btn.disabled = false; // still allow override - operator may know better than the checker
-      asisBtn.style.display = 'none';
     } else if (keyInputVerified) {
-      hint.textContent = '格式正確 (25碼)';
-      hint.style.color = 'var(--success)';
+      hint.textContent = ambiguousHits.length ? '已標示待核對字元，確認無誤即可送出' : '格式正確 (25碼)';
+      hint.style.color = ambiguousHits.length ? 'var(--warn)' : 'var(--success)';
       btn.disabled = false;
-      asisBtn.style.display = 'none';
     } else {
-      // Gemini flagged this as low-confidence / uncertain. Don't force the
-      // operator to make a fake edit just to unlock the button when the
-      // read is already correct - give them an explicit "I checked it,
-      // it's right" action instead. Typing an actual correction in the
-      // textarea (formatKeyInput) still works too and unlocks the same way.
-      hint.textContent = 'OCR 候選碼，請核對序號是否正確（如需修改可直接編輯）';
+      hint.textContent = ambiguousHits.length
+        ? '偵測到易混淆字元，核對下方提示後再產生 QR'
+        : 'OCR 候選碼，請核對後修改任一字再產生 QR';
       hint.style.color = 'var(--warn)';
       btn.disabled = true;
-      asisBtn.style.display = 'flex';
     }
   } else {
+    ambiguousHint.style.display = 'none';
     hint.textContent = `已輸入 ${clean.length}/25 碼`;
     hint.style.color = clean.length > 0 ? 'var(--warn)' : 'var(--muted)';
     btn.disabled = clean.length !== 25;
-    asisBtn.style.display = 'none';
   }
 };
-
-function confirmAsIs() {
-  keyInputVerified = true;
-  validateKey(document.getElementById('key-input').value);
-}
 
 function generateQR() {
   const key = getNormalizedKeyFromInput();
@@ -2026,7 +1984,6 @@ function resetAllInPlace() {
   document.getElementById('ocr-raw').textContent = 'Waiting for OCR...';
   document.getElementById('progress-fill').style.width = '0%';
   document.getElementById('btn-gen-qr').disabled = true;
-  document.getElementById('btn-confirm-asis').style.display = 'none';
   setOcrStatus('processing', 'Waiting for image...');
 
   showSection('sec-capture');
