@@ -582,6 +582,89 @@
     word-break: break-all;
   }
 
+  .qr-key-confirm.key-groups-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0 2px;
+  }
+
+  .qr-key-confirm .key-dash {
+    color: var(--muted);
+    padding: 0 1px;
+  }
+
+  .qr-key-confirm .key-group {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 62px;
+    padding: 4px 4px;
+    border-radius: 5px;
+    border: 1px dashed rgba(0,255,136,0.35);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .qr-key-confirm .key-group:active {
+    background: rgba(0,255,136,0.15);
+    transform: scale(0.96);
+  }
+
+  .qr-key-confirm .key-group.edited {
+    border-style: solid;
+    border-color: var(--accent2);
+    color: var(--accent2);
+    background: rgba(255,107,53,0.08);
+  }
+
+  .qr-key-confirm .key-group.warn-chars {
+    border-color: var(--warn);
+    color: var(--warn);
+    background: rgba(255,214,10,0.08);
+  }
+
+  .qr-key-confirm .key-group.editing {
+    padding: 0;
+    border-style: solid;
+    border-color: var(--accent);
+    background: rgba(0,212,255,0.1);
+  }
+
+  .qr-key-confirm .key-group-input {
+    width: 62px;
+    text-align: center;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--accent);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    padding: 4px 2px;
+    text-transform: uppercase;
+  }
+
+  .qr-key-edit-hint {
+    font-size: 9px;
+    color: var(--muted);
+    text-align: center;
+    letter-spacing: 1px;
+    margin-top: 6px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  .step#s3.step-jumpable .step-num,
+  .step#s3.step-jumpable .step-label {
+    cursor: pointer;
+  }
+
+  .step#s3.step-jumpable .step-num:active {
+    transform: scale(0.9);
+  }
+
   /* Hidden input for file */
   #file-input { display: none; }
 
@@ -665,7 +748,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.5</div>
+      <div class="version-badge" id="app-version">V3.6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -683,7 +766,7 @@
       <div class="step-label">辨識</div>
     </div>
     <div class="step-line" id="l2"></div>
-    <div class="step" id="s3">
+    <div class="step" id="s3" onclick="goToStep3()">
       <div class="step-num">03</div>
       <div class="step-label">確認</div>
     </div>
@@ -829,7 +912,8 @@ XXXXX"
 
     <div id="qr-wrap">
       <div id="qr-box"></div>
-      <div class="qr-key-confirm" id="qr-key-text"></div>
+      <div class="qr-key-confirm key-groups-wrap" id="qr-key-text"></div>
+      <div class="qr-key-edit-hint">點任一組序號可修正單一組錯字（改完自動重產 QR）</div>
       <div class="qr-hint">
         <div>用藍牙條碼槍掃描上方 QR Code</div>
         <div style="margin-top:4px; color:var(--success);">▶ 自動輸入到 Windows 啟動視窗</div>
@@ -849,7 +933,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.5';
+const APP_VERSION = 'V3.6';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1878,13 +1962,13 @@ function generateQR() {
   generateQRForKey(key);
 }
 
-function generateQRForKey(key) {
+function generateQRForKey(key, options = {}) {
   currentKey = key;
 
   showSection('sec-qr');
   setStep(4);
 
-  document.getElementById('qr-key-text').textContent = key;
+  renderQrKeyGroups(key);
 
   const box = document.getElementById('qr-box');
   box.innerHTML = '';
@@ -1897,7 +1981,101 @@ function generateQRForKey(key) {
     colorLight: '#ffffff',
     correctLevel: QRCode.CorrectLevel.H
   });
-  document.getElementById('sec-qr').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  if (!options.silentScroll) {
+    document.getElementById('sec-qr').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+// ─── Step 4 單組序號編輯 ──────────────────────────────────
+let editedKeyGroups = new Set();
+
+function splitKeyGroups(key) {
+  const clean = String(key || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 25);
+  const groups = clean.match(/.{1,5}/g) || [];
+  while (groups.length < 5) groups.push('');
+  return groups.slice(0, 5);
+}
+
+function renderQrKeyGroups(key) {
+  const groups = splitKeyGroups(key);
+  const wrap = document.getElementById('qr-key-text');
+  wrap.innerHTML = '';
+  groups.forEach((g, idx) => {
+    if (idx > 0) {
+      const dash = document.createElement('span');
+      dash.className = 'key-dash';
+      dash.textContent = '-';
+      wrap.appendChild(dash);
+    }
+    const span = document.createElement('span');
+    span.className = 'key-group';
+    span.dataset.idx = String(idx);
+    span.textContent = g;
+    if (editedKeyGroups.has(idx)) span.classList.add('edited');
+    if (findInvalidKeyChars(g).length) span.classList.add('warn-chars');
+    span.addEventListener('click', () => editKeyGroup(idx));
+    wrap.appendChild(span);
+  });
+}
+
+function editKeyGroup(idx) {
+  const wrap = document.getElementById('qr-key-text');
+  const span = wrap.querySelector('.key-group[data-idx="' + idx + '"]');
+  if (!span || span.classList.contains('editing')) return;
+
+  const oldVal = span.textContent;
+  span.textContent = '';
+  span.classList.add('editing');
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.maxLength = 5;
+  input.value = oldVal;
+  input.className = 'key-group-input';
+  input.autocapitalize = 'characters';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  span.appendChild(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    input.removeEventListener('blur', onBlur);
+    input.removeEventListener('keydown', onKey);
+    if (commit) {
+      const v = input.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 5);
+      if (v && v !== oldVal) editedKeyGroups.add(idx);
+      commitKeyGroup(idx, v || oldVal);
+    } else {
+      renderQrKeyGroups(currentKey);
+    }
+  };
+  const onBlur = () => finish(true);
+  const onKey = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.addEventListener('blur', onBlur);
+  input.addEventListener('keydown', onKey);
+}
+
+function commitKeyGroup(idx, value) {
+  const groups = splitKeyGroups(currentKey);
+  groups[idx] = value;
+  const newKey = groups.join('-');
+  generateQRForKey(newKey, { silentScroll: true });
+}
+
+// ─── 從 Step4 跳回 Step3 整段編輯 ─────────────────────────
+function goToStep3() {
+  const s3 = document.getElementById('s3');
+  if (!s3.classList.contains('active') && !s3.classList.contains('done')) return;
+  editedKeyGroups.clear();
+  showConfirm(currentKey, { verified: true });
 }
 
 // ─── Navigation ───────────────────────────────────────────
@@ -1918,6 +2096,7 @@ function resetAllInPlace() {
   stopApiQrScanner();
   scanRunId++;
   currentKey = '';
+  editedKeyGroups.clear();
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
 
   document.getElementById('btn-camera').style.display = 'flex';
@@ -1957,6 +2136,8 @@ function setStep(n) {
     if (i < n) s.classList.add('done');
     else if (i === n) s.classList.add('active');
   }
+  const s3 = document.getElementById('s3');
+  s3.classList.toggle('step-jumpable', s3.classList.contains('active') || s3.classList.contains('done'));
   for (let i = 1; i <= 3; i++) {
     const l = document.getElementById('l' + i);
     l.classList.toggle('done', i < n);
