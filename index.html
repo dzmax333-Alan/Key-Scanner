@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">TEST4</div>
+      <div class="version-badge" id="app-version">TEST5</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -856,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'TEST4';
+const APP_VERSION = 'TEST5';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1482,8 +1482,9 @@ function buildInkMask(ctx, width, height) {
 
 // Row-projection line detection. This label stock always prints the key
 // as 2 groups / 2 groups / 1 group across exactly 3 lines (matches the
-// on-screen guide the operator aims at), so we keep the 3 tallest ink
-// bands and assume they ARE those 3 lines, top to bottom.
+// on-screen guide the operator aims at). Returns ALL bands found above
+// the noise floor, sorted top to bottom - caller decides how to use them
+// (and can inspect how many/how tall when things go wrong).
 function findLineBands(mask, width, height) {
   const rowThresh = Math.max(3, width * 0.01);
   const bands = [];
@@ -1495,18 +1496,18 @@ function findLineBands(mask, width, height) {
     if (count > rowThresh && !inBand) { inBand = true; start = y; }
     else if (count <= rowThresh && inBand) {
       inBand = false;
-      if (y - start > height * 0.05) bands.push([start, y]);
+      if (y - start > height * 0.03) bands.push([start, y]);
     }
   }
-  if (inBand && height - start > height * 0.05) bands.push([start, height]);
-  const top3 = bands.sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 3);
-  return top3.sort((a, b) => a[0] - b[0]);
+  if (inBand && height - start > height * 0.03) bands.push([start, height]);
+  return bands.sort((a, b) => a[0] - b[0]);
 }
 
 // Column-projection character detection within one line band. Blobs
 // narrower than half the median blob width are dropped - that's how the
 // small "*" separator dot between groups gets filtered out without
-// needing to special-case it.
+// needing to special-case it. Returns ALL surviving blobs (caller decides
+// how many to keep / whether the count is usable).
 function findCharBlobs(mask, width, y0, y1) {
   const colThresh = 1;
   const raw = [];
@@ -1529,10 +1530,12 @@ function findCharBlobs(mask, width, y0, y1) {
 
 // Full pipeline: segments the "guide frame" image into 25 per-character
 // pixel rects in reading order, using this label's fixed 3-line layout
-// (groups 1-2 / groups 3-4 / group 5). Returns null if segmentation
-// doesn't land on the expected blob counts (10, 10, 5) - a bad photo or
-// an unexpected label layout should fall back to manual review rather
-// than silently hand back nonsense rects.
+// (groups 1-2 / groups 3-4 / group 5). Tolerant of EXTRA blobs (icon
+// fragments, stray marks) - those get dropped as the narrowest outliers
+// - but not of too FEW, since there's nothing to reliably invent a
+// missing character boundary from. Always returns diagnostic info
+// (`debug`) alongside the result so a failure is visible instead of a
+// silent null.
 async function segmentKeyCharacters(sourceDataUrl) {
   const img = await dataUrlToImage(sourceDataUrl);
   const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
@@ -1542,18 +1545,48 @@ async function segmentKeyCharacters(sourceDataUrl) {
   ctx.drawImage(img, 0, 0);
   const mask = buildInkMask(ctx, W, H);
 
-  const bands = findLineBands(mask, W, H);
-  if (bands.length !== 3) return null;
+  const allBands = findLineBands(mask, W, H);
+  const bands = allBands.slice()
+    .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 3)
+    .sort((a, b) => a[0] - b[0]);
+
+  const debug = {
+    bandCount: allBands.length,
+    bandHeights: allBands.map(b => b[1] - b[0]),
+    allBands,
+    usedBands: bands,
+    lineBlobCounts: [],
+    sourceW: W, sourceH: H
+  };
+
+  if (bands.length !== 3) {
+    debug.failReason = `只偵測到 ${allBands.length} 個文字帶（需要 3 個）`;
+    return { rects: null, debug };
+  }
 
   const expectedCounts = [10, 10, 5];
   const rects = [];
   for (let i = 0; i < 3; i++) {
     const [y0, y1] = bands[i];
-    const blobs = findCharBlobs(mask, W, y0, y1);
-    if (blobs.length !== expectedCounts[i]) return null;
+    let blobs = findCharBlobs(mask, W, y0, y1);
+    debug.lineBlobCounts.push(blobs.length);
+    const expected = expectedCounts[i];
+    if (blobs.length < expected) {
+      debug.failReason = `第 ${i + 1} 行只切出 ${blobs.length} 個字元（需要 ${expected} 個）`;
+      return { rects: null, debug };
+    }
+    if (blobs.length > expected) {
+      // Extra blobs are almost always leftover noise (icon fragment,
+      // stray mark) rather than real characters - keep the WIDEST ones,
+      // since real character strokes are consistently wider than noise
+      // specks, then restore left-to-right order.
+      blobs = blobs.slice()
+        .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, expected)
+        .sort((a, b) => a[0] - b[0]);
+    }
     for (const [x0, x1] of blobs) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
   }
-  return rects; // length 25, reading order, index 0 = character 1
+  return { rects, debug };
 }
 
 // Debug aid: draws the FULL "guide frame" image (shrunk) with a red
@@ -1715,6 +1748,35 @@ async function verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect) {
 // manual-review prompt in the UI. `debugItems` carries everything needed
 // to visually inspect what happened (rect overlay, crop, which method
 // decided, final letter).
+// Debug aid: draws the full source image with each detected line band
+// outlined - green for the 3 bands actually used, gray for any extra
+// candidate bands that got filtered out. Lets you see at a glance whether
+// segmentation is finding the right lines at all, vs. finding too many
+// (icon/other text row also getting picked up) or too few (two lines
+// merging together because the gap between them wasn't clean enough).
+async function renderBandsOverlay(sourceDataUrl, allBands, usedBands) {
+  try {
+    const img = await dataUrlToImage(sourceDataUrl);
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const displayW = 360;
+    const scale = displayW / W;
+    const canvas = document.createElement('canvas');
+    canvas.width = displayW;
+    canvas.height = Math.round(H * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const usedSet = new Set(usedBands.map(b => b.join(',')));
+    ctx.lineWidth = 2;
+    for (const [y0, y1] of allBands) {
+      ctx.strokeStyle = usedSet.has([y0, y1].join(',')) ? '#00ff88' : '#64748b';
+      ctx.strokeRect(0, y0 * scale, canvas.width, (y1 - y0) * scale);
+    }
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch {
+    return null;
+  }
+}
+
 async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
   const chars = key.replace(/-/g, '').split('');
   const resolutionLog = [];
@@ -1726,7 +1788,7 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
     return { resolvedKey: key, resolutionLog, stillUnresolved, debugItems };
   }
 
-  const rects = await segmentKeyCharacters(sourceDataUrl);
+  const { rects, debug } = await segmentKeyCharacters(sourceDataUrl);
 
   for (const hit of ambiguousPositions) {
     const pos = hit.position - 1;
@@ -1735,9 +1797,11 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
 
     if (!rect) {
       stillUnresolved.push({ position: hit.position, char: originalChar });
+      const bandOverlay = await renderBandsOverlay(sourceDataUrl, debug.allBands, debug.usedBands);
       debugItems.push({
         position: hit.position, original: originalChar, final: originalChar,
-        method: '本地字元分割失敗（找不到預期的行數/字元數），需人工核對'
+        method: `本地字元分割失敗：${debug.failReason || '未知原因'}（偵測到 ${debug.bandCount} 個文字帶，高度分別為 ${debug.bandHeights.join(', ')}px；各行切出字元數：${debug.lineBlobCounts.join(', ') || '(尚未切到行)'}）`,
+        overlayDataUrl: bandOverlay
       });
       continue;
     }
