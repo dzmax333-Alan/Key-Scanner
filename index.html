@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.6</div>
+      <div class="version-badge" id="app-version">test1</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -794,6 +794,11 @@
       <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">OCR 原始辨識文字</div>
       <div id="ocr-raw" style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--muted); background:rgba(0,0,0,0.3); border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-all; max-height:120px; overflow-y:auto; min-height:36px;">等待辨識...</div>
     </div>
+
+    <div id="vy-debug-wrap" style="display:none; margin-top:10px;">
+      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">V/Y 判斷除錯（裁切框 / 二值化後）</div>
+      <div id="vy-debug" style="display:flex; flex-wrap:wrap; gap:10px; background:rgba(0,0,0,0.3); border-radius:8px; padding:10px;"></div>
+    </div>
   </div>
 
   <!-- STEP 3: 確認序號 -->
@@ -851,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.6';
+const APP_VERSION = 'test1';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1320,6 +1325,7 @@ async function processImageV2(dataUrl, containerAspect) {
         key = ambiguousResolution.resolvedKey;
       }
     }
+    renderVyDebug(ambiguousResolution?.debugItems);
 
     candidateKey = key;
     ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
@@ -1471,15 +1477,19 @@ async function cropGlyphCanvas(sourceDataUrl, box, targetH = 160) {
 // lower half (2 clusters); Y's stem is a single continuous stroke there
 // (1 cluster). This is the same kind of per-character geometric test a
 // license-plate reader uses instead of re-asking an LLM to eyeball it.
-// Returns 'V', 'Y', or null if the signal is too weak/noisy to trust
-// (bad crop, dirt, blur) - callers should fall back to a focused re-query
-// rather than accept a low-confidence geometry guess.
+// Returns { result, avg, rawDataUrl, binDataUrl } - result is 'V'/'Y'/null
+// (null = signal too weak/noisy to trust: bad crop, dirt, blur). The two
+// data URLs are always returned when a crop was possible, so callers can
+// SHOW what was actually analyzed instead of guessing blind.
 async function classifyVorYFromBox(sourceDataUrl, box) {
+  const empty = { result: null, avg: null, rawDataUrl: null, binDataUrl: null };
   try {
     const cropped = await cropGlyphCanvas(sourceDataUrl, box, 160);
-    if (!cropped) return null;
+    if (!cropped) return empty;
     const { canvas, ctx } = cropped;
+    const rawDataUrl = canvas.toDataURL('image/png');
     enhanceForOcr(ctx, canvas.width, canvas.height, 'threshold');
+    const binDataUrl = canvas.toDataURL('image/png');
     const { width, height, data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
     const bandTop = Math.round(height * 0.40);
@@ -1495,14 +1505,15 @@ async function classifyVorYFromBox(sourceDataUrl, box) {
       }
       if (clusters > 0) rowClusterCounts.push(clusters);
     }
-    if (rowClusterCounts.length < 3) return null; // not enough signal to trust
+    if (rowClusterCounts.length < 3) return { result: null, avg: null, rawDataUrl, binDataUrl };
 
     const avg = rowClusterCounts.reduce((a, b) => a + b, 0) / rowClusterCounts.length;
-    if (avg <= 1.25) return 'Y'; // one continuous stem
-    if (avg >= 1.75) return 'V'; // two separate diagonal strokes
-    return null; // straddles the middle - genuinely ambiguous crop, don't guess
+    let result = null;
+    if (avg <= 1.25) result = 'Y'; // one continuous stem
+    else if (avg >= 1.75) result = 'V'; // two separate diagonal strokes
+    return { result, avg, rawDataUrl, binDataUrl };
   } catch {
-    return null;
+    return empty;
   }
 }
 
@@ -1510,10 +1521,12 @@ async function classifyVorYFromBox(sourceDataUrl, box) {
 // this one already-cropped, already-zoomed character, as a strict binary
 // choice. This is a much easier task than reading all 25 characters at
 // once and is far more reliable for the specific V/Y case - still fully
-// automated, no operator involved.
+// automated, no operator involved. Also returns the exact crop sent, so
+// it's visible in the debug panel what the model was actually shown.
 async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
+  const empty = { result: null, cropDataUrl: null };
   const cropped = await cropGlyphCanvas(sourceDataUrl, box, 200);
-  if (!cropped) return null;
+  if (!cropped) return empty;
   const jpegUrl = cropped.canvas.toDataURL('image/jpeg', 0.92);
   const base64 = jpegUrl.split(',')[1];
   const prompt = [
@@ -1539,14 +1552,13 @@ async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
       }
     );
     incrementApiUsage(); // this call reached Google and counts against real quota
-    if (!res.ok) return null;
+    if (!res.ok) return { result: null, cropDataUrl: jpegUrl };
     const data = await res.json();
     const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
-    if (text.startsWith('V')) return 'V';
-    if (text.startsWith('Y')) return 'Y';
-    return null;
+    const result = text.startsWith('V') ? 'V' : text.startsWith('Y') ? 'Y' : null;
+    return { result, cropDataUrl: jpegUrl };
   } catch {
-    return null;
+    return { result: null, cropDataUrl: jpegUrl };
   }
 }
 
@@ -1555,51 +1567,103 @@ async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
 // fallback (costs one extra API call, only when geometry can't decide).
 // Only characters neither method can resolve end up in `stillUnresolved` -
 // that list should be rare, and is the only thing that still surfaces a
-// manual-review prompt in the UI.
+// manual-review prompt in the UI. `debugItems` carries everything needed
+// to visually inspect what happened at each position (crop images,
+// cluster-count average, which method decided, final letter).
 async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) {
   const chars = key.replace(/-/g, '').split('');
   const resolutionLog = [];
   const stillUnresolved = [];
   const coveredPositions = new Set();
+  const debugItems = [];
 
   for (const item of (ambiguousList || [])) {
     const pos = Number(item?.index) - 1;
     if (!Number.isInteger(pos) || pos < 0 || pos >= chars.length) continue;
     if (!/^[VY]$/.test(chars[pos])) continue; // sanity: position must actually hold V or Y
     coveredPositions.add(pos + 1);
+    const originalChar = chars[pos];
 
     if (!Array.isArray(item.box) || item.box.length !== 4) {
-      stillUnresolved.push({ position: pos + 1, char: chars[pos] });
+      stillUnresolved.push({ position: pos + 1, char: originalChar });
+      debugItems.push({ position: pos + 1, original: originalChar, method: 'no box from Gemini', final: originalChar });
       continue;
     }
 
-    const geoResult = await classifyVorYFromBox(sourceDataUrl, item.box);
-    if (geoResult) {
-      resolutionLog.push(geoResult === chars[pos]
-        ? `第${pos + 1}碼 幾何比對：確認為 ${geoResult}`
-        : `第${pos + 1}碼 幾何比對：${chars[pos]} → ${geoResult}`);
-      chars[pos] = geoResult;
+    const geo = await classifyVorYFromBox(sourceDataUrl, item.box);
+    if (geo.result) {
+      resolutionLog.push(geo.result === originalChar
+        ? `第${pos + 1}碼 幾何比對：確認為 ${geo.result}`
+        : `第${pos + 1}碼 幾何比對：${originalChar} → ${geo.result}`);
+      chars[pos] = geo.result;
+      debugItems.push({
+        position: pos + 1, original: originalChar, final: geo.result, method: `幾何比對 (avg=${geo.avg?.toFixed(2)})`,
+        rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl
+      });
       continue;
     }
 
-    const apiResult = await verifyCharWithGeminiCrop(apiKey, sourceDataUrl, item.box);
-    if (apiResult) {
-      resolutionLog.push(apiResult === chars[pos]
-        ? `第${pos + 1}碼 聚焦二次辨識：確認為 ${apiResult}`
-        : `第${pos + 1}碼 聚焦二次辨識：${chars[pos]} → ${apiResult}`);
-      chars[pos] = apiResult;
+    const api = await verifyCharWithGeminiCrop(apiKey, sourceDataUrl, item.box);
+    if (api.result) {
+      resolutionLog.push(api.result === originalChar
+        ? `第${pos + 1}碼 聚焦二次辨識：確認為 ${api.result}`
+        : `第${pos + 1}碼 聚焦二次辨識：${originalChar} → ${api.result}`);
+      chars[pos] = api.result;
+      debugItems.push({
+        position: pos + 1, original: originalChar, final: api.result,
+        method: `幾何無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})，改用聚焦二次辨識`,
+        rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
+      });
       continue;
     }
 
-    stillUnresolved.push({ position: pos + 1, char: chars[pos] });
+    stillUnresolved.push({ position: pos + 1, char: originalChar });
+    debugItems.push({
+      position: pos + 1, original: originalChar, final: originalChar,
+      method: `兩種方法都無法判斷 (avg=${geo.avg != null ? geo.avg.toFixed(2) : 'n/a'})`,
+      rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
+    });
   }
 
   return {
     resolvedKey: chars.join('').match(/.{1,5}/g).join('-'),
     resolutionLog,
     stillUnresolved,
-    coveredPositions
+    coveredPositions,
+    debugItems
   };
+}
+
+// Renders what resolveAmbiguousChars() actually did for each V/Y position -
+// the raw crop (is the box even pointing at the right glyph?), the
+// binarized crop used for the geometry test (did threshold turn it into
+// noise?), and, if it got that far, the crop sent to the focused
+// re-query. This is the fastest way to tell whether a wrong result comes
+// from a bad bounding box, bad binarization, or the letter genuinely being
+// too degraded to call - each needs a different fix.
+function renderVyDebug(debugItems) {
+  const wrap = document.getElementById('vy-debug-wrap');
+  const box = document.getElementById('vy-debug');
+  if (!debugItems || !debugItems.length) {
+    wrap.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  const thumb = (src, label) => src
+    ? `<div style="text-align:center;"><img src="${src}" style="height:60px; image-rendering:pixelated; border:1px solid var(--border); border-radius:4px; background:#fff;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">${label}</div></div>`
+    : '';
+  box.innerHTML = debugItems.map(item => `
+    <div style="display:flex; flex-direction:column; gap:4px; padding:8px; border:1px solid var(--border); border-radius:8px; min-width:150px;">
+      <div style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--accent);">第${item.position}碼：${item.original} → ${item.final}</div>
+      <div style="display:flex; gap:6px;">
+        ${thumb(item.rawDataUrl, '原始裁切')}
+        ${thumb(item.binDataUrl, '二值化')}
+        ${thumb(item.cropDataUrl, '送去二次辨識')}
+      </div>
+      <div style="font-size:9px; color:var(--muted); font-family:'Share Tech Mono',monospace;">${item.method}</div>
+    </div>
+  `).join('');
+  wrap.style.display = 'block';
 }
 
 const CONFIDENCE_RETAKE_THRESHOLD = 60;
@@ -2174,6 +2238,7 @@ function resetAllInPlace() {
   document.getElementById('qr-box').innerHTML = '';
   document.getElementById('qr-key-text').textContent = '';
   document.getElementById('ocr-raw').textContent = 'Waiting for OCR...';
+  renderVyDebug(null);
   document.getElementById('progress-fill').style.width = '0%';
   document.getElementById('btn-gen-qr').disabled = true;
   setOcrStatus('processing', 'Waiting for image...');
