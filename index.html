@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">test6</div>
+      <div class="version-badge" id="app-version">test7</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -821,6 +821,13 @@ XXXXX"
       <div id="vy-debug" style="display:flex; flex-wrap:wrap; gap:10px; background:rgba(0,0,0,0.3); border-radius:8px; padding:10px;"></div>
     </div>
 
+    <div id="raw-image-download-wrap" style="display:none; margin-bottom:12px; padding:10px; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
+      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:8px; text-transform:uppercase;">除錯用：下載送給 Gemini 的原始裁切圖</div>
+      <a id="raw-image-download-link" href="#" download="guide-frame.jpg" style="display:inline-block; padding:8px 14px; border-radius:6px; background:rgba(0,212,255,0.15); border:1px solid var(--accent); color:var(--accent); font-family:'Share Tech Mono',monospace; font-size:11px; text-decoration:none;">
+        ⬇ 下載原始圖片（未壓縮，非螢幕截圖）
+      </a>
+    </div>
+
     <button class="btn btn-success" id="btn-gen-qr" onclick="generateQR()">
       ✅ 確認，產生 QR Code
     </button>
@@ -856,7 +863,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'test6';
+const APP_VERSION = 'test7';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1286,6 +1293,21 @@ async function processImageV2(dataUrl, containerAspect) {
     // Keep showing the operator's original color photo (already set above)
     // instead of swapping in the internal black/white OCR crop - that
     // binarized image is only meant for the API call, not for display.
+
+    // Expose the EXACT image sent to Gemini for the key read (not a
+    // screenshot, not re-compressed) so it can be downloaded straight off
+    // the device for offline debugging - screenshots lose fidelity and
+    // add scaling that makes pixel-level debugging unreliable.
+    const guideFrameForDownload = images.find(i => i.label === 'guide frame - color');
+    if (guideFrameForDownload) {
+      const link = document.getElementById('raw-image-download-link');
+      const wrap = document.getElementById('raw-image-download-wrap');
+      link.href = guideFrameForDownload.dataUrl;
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.download = `guide-frame-${stamp}.jpg`;
+      wrap.style.display = 'block';
+    }
+
     progressEl.style.width = '45%';
     statusEl.textContent = 'Sending to Gemini API...';
 
@@ -2457,6 +2479,7 @@ function resetAllInPlace() {
   document.getElementById('qr-key-text').textContent = '';
   document.getElementById('ocr-raw').textContent = 'Waiting for OCR...';
   renderVyDebug(null);
+  document.getElementById('raw-image-download-wrap').style.display = 'none';
   document.getElementById('progress-fill').style.width = '0%';
   document.getElementById('btn-gen-qr').disabled = true;
   setOcrStatus('processing', 'Waiting for image...');
