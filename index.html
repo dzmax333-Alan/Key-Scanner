@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">test7</div>
+      <div class="version-badge" id="app-version">test8</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -822,9 +822,11 @@ XXXXX"
     </div>
 
     <div id="raw-image-download-wrap" style="display:none; margin-bottom:12px; padding:10px; border:1px solid var(--border); border-radius:8px; background:rgba(0,0,0,0.3);">
-      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:8px; text-transform:uppercase;">除錯用：下載送給 Gemini 的原始裁切圖</div>
+      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:8px; text-transform:uppercase;">除錯用：送給 Gemini 的原始裁切圖</div>
+      <div style="font-size:10px; color:var(--muted); margin-bottom:8px;">長按下方圖片 → 選「儲存圖片」，或點按鈕下載：</div>
+      <img id="raw-image-preview" src="" alt="送給 Gemini 的裁切圖" style="width:100%; border:1px solid var(--border); border-radius:6px; margin-bottom:8px; -webkit-touch-callout:default; display:block;">
       <a id="raw-image-download-link" href="#" download="guide-frame.jpg" style="display:inline-block; padding:8px 14px; border-radius:6px; background:rgba(0,212,255,0.15); border:1px solid var(--accent); color:var(--accent); font-family:'Share Tech Mono',monospace; font-size:11px; text-decoration:none;">
-        ⬇ 下載原始圖片（未壓縮，非螢幕截圖）
+        ⬇ 下載原始圖片
       </a>
     </div>
 
@@ -863,13 +865,14 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'test7';
+const APP_VERSION = 'test8';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
 let currentKey = '';
 let scanRunId = 0;
 let keyInputVerified = true;
+let lastGuideFrameBlobUrl = null;
 
 // Load saved API key on startup
 window.addEventListener('DOMContentLoaded', () => {
@@ -1295,14 +1298,32 @@ async function processImageV2(dataUrl, containerAspect) {
     // binarized image is only meant for the API call, not for display.
 
     // Expose the EXACT image sent to Gemini for the key read (not a
-    // screenshot, not re-compressed) so it can be downloaded straight off
-    // the device for offline debugging - screenshots lose fidelity and
-    // add scaling that makes pixel-level debugging unreliable.
+    // screenshot, not re-compressed) so it can be saved straight off the
+    // device for offline debugging - screenshots lose fidelity and add
+    // scaling that makes pixel-level debugging unreliable.
+    // A data: URL with the `download` attribute is unreliable on several
+    // mobile browsers (silently does nothing instead of downloading), so
+    // this uses a Blob object URL instead, and ALSO shows the image
+    // inline so it can be saved via long-press -> "Save image" as a
+    // fallback that works everywhere regardless of download-attribute
+    // support.
     const guideFrameForDownload = images.find(i => i.label === 'guide frame - color');
     if (guideFrameForDownload) {
+      const preview = document.getElementById('raw-image-preview');
       const link = document.getElementById('raw-image-download-link');
       const wrap = document.getElementById('raw-image-download-wrap');
-      link.href = guideFrameForDownload.dataUrl;
+      preview.src = guideFrameForDownload.dataUrl;
+      try {
+        const byteChars = atob(guideFrameForDownload.base64);
+        const byteNumbers = new Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+        const blob = new Blob([new Uint8Array(byteNumbers)], { type: guideFrameForDownload.mimeType || 'image/jpeg' });
+        if (lastGuideFrameBlobUrl) URL.revokeObjectURL(lastGuideFrameBlobUrl);
+        lastGuideFrameBlobUrl = URL.createObjectURL(blob);
+        link.href = lastGuideFrameBlobUrl;
+      } catch {
+        link.href = guideFrameForDownload.dataUrl; // fall back to data: URL if Blob creation fails
+      }
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       link.download = `guide-frame-${stamp}.jpg`;
       wrap.style.display = 'block';
@@ -1486,6 +1507,35 @@ function findAmbiguousKeyPositions(key) {
 // flagged ~20-25% of the whole label as "ink"); requiring BOTH low
 // value AND low saturation (HSV) cuts that down to roughly what the
 // actual text covers.
+// ─── Line-level focused re-read (replaces per-character pixel work) ────
+//
+// 2026-07: two earlier approaches both failed against real photos from
+// this label stock:
+//   1. Asking Gemini for a per-character bounding box - it returned a
+//      tiny placeholder-looking box glued to the image center, not a
+//      real detection.
+//   2. Locally segmenting individual characters via column projection -
+//      the label's own icons (key symbol, checkbox, small QR code) sit
+//      close enough to the text, and are similar enough in stroke
+//      density, that they kept getting sliced into extra fake "character"
+//      blobs, and the blob count never reliably matched (10, 10, 5).
+//
+// Both failures share a root cause: they require PRECISE localization.
+// This version deliberately avoids needing precision anywhere:
+//   - Line detection only needs to find y-ranges (row projection), which
+//     tested reliably once the one genuinely reliable exclusion - the
+//     dense QR/barcode block that's always anchored to the right edge -
+//     is removed by column ink DENSITY (not a guessed pixel offset).
+//   - Character identification is handed back to Gemini, but scoped down
+//     to "read this one short strip, ignore any icon at its edge" -
+//     reading text (even amid clutter) is what it's actually reliable
+//     at; per-glyph coordinates and isolated single-character geometry
+//     calls are what it was NOT reliable at.
+//   - Getting exactly 3 lines with 10/10/5 characters is no longer a
+//     hard requirement anywhere - a rough, generously-padded crop is
+//     enough, because the fallback is "ask again" rather than "measure
+//     precisely".
+
 function isInkPixelHSV(r, g, b) {
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
   const value = max;
@@ -1502,19 +1552,36 @@ function buildInkMask(ctx, width, height) {
   return mask;
 }
 
-// Row-projection line detection. This label stock always prints the key
-// as 2 groups / 2 groups / 1 group across exactly 3 lines (matches the
-// on-screen guide the operator aims at). Returns ALL bands found above
-// the noise floor, sorted top to bottom - caller decides how to use them
-// (and can inspect how many/how tall when things go wrong).
-function findLineBands(mask, width, height) {
-  const rowThresh = Math.max(3, width * 0.01);
+// Finds where the dense icon/QR/barcode block on the right edge of the
+// crop starts, using column ink DENSITY (fraction of that column's
+// height that's ink) rather than a fixed pixel offset - verified against
+// a real photo: text columns never exceeded ~31% density even at their
+// densest, while the QR-style block sat at 90%+ density for 140+
+// consecutive columns. Returns the full width if no such block is found.
+function findRightDenseBlockStart(mask, width, height) {
+  const denseThresh = 0.4;
+  let rightStart = width;
+  for (let x = width - 1; x >= 0; x--) {
+    let count = 0;
+    for (let y = 0; y < height; y++) count += mask[y * width + x];
+    const density = count / height;
+    if (density > denseThresh) rightStart = x;
+    else if (rightStart < width) break;
+  }
+  return rightStart;
+}
+
+// Row-projection line-band detection, restricted to columns [0, textWidth)
+// so the dense right-edge block doesn't swamp every row's ink count.
+// Returns ALL bands found (caller decides how many to trust).
+function findRowBands(mask, width, height, textWidth) {
+  const rowThresh = Math.max(3, textWidth * 0.01);
   const bands = [];
   let inBand = false, start = 0;
   for (let y = 0; y < height; y++) {
     let count = 0;
     const rowStart = y * width;
-    for (let x = 0; x < width; x++) count += mask[rowStart + x];
+    for (let x = 0; x < textWidth; x++) count += mask[rowStart + x];
     if (count > rowThresh && !inBand) { inBand = true; start = y; }
     else if (count <= rowThresh && inBand) {
       inBand = false;
@@ -1522,43 +1589,15 @@ function findLineBands(mask, width, height) {
     }
   }
   if (inBand && height - start > height * 0.03) bands.push([start, height]);
-  return bands.sort((a, b) => a[0] - b[0]);
+  return bands;
 }
 
-// Column-projection character detection within one line band. Blobs
-// narrower than half the median blob width are dropped - that's how the
-// small "*" separator dot between groups gets filtered out without
-// needing to special-case it. Returns ALL surviving blobs (caller decides
-// how many to keep / whether the count is usable).
-function findCharBlobs(mask, width, y0, y1) {
-  const colThresh = 1;
-  const raw = [];
-  let inBlob = false, start = 0;
-  for (let x = 0; x < width; x++) {
-    let count = 0;
-    for (let y = y0; y < y1; y++) count += mask[y * width + x];
-    if (count > colThresh && !inBlob) { inBlob = true; start = x; }
-    else if (count <= colThresh && inBlob) {
-      inBlob = false;
-      if (x - start > 6) raw.push([start, x]);
-    }
-  }
-  if (inBlob) raw.push([start, width]);
-  if (!raw.length) return [];
-  const widths = raw.map(b => b[1] - b[0]).sort((a, b) => a - b);
-  const medianW = widths[Math.floor(widths.length / 2)];
-  return raw.filter(b => (b[1] - b[0]) >= medianW * 0.5);
-}
-
-// Full pipeline: segments the "guide frame" image into 25 per-character
-// pixel rects in reading order, using this label's fixed 3-line layout
-// (groups 1-2 / groups 3-4 / group 5). Tolerant of EXTRA blobs (icon
-// fragments, stray marks) - those get dropped as the narrowest outliers
-// - but not of too FEW, since there's nothing to reliably invent a
-// missing character boundary from. Always returns diagnostic info
-// (`debug`) alongside the result so a failure is visible instead of a
-// silent null.
-async function segmentKeyCharacters(sourceDataUrl) {
+// Full pipeline: finds the y-range of each of the 3 key-text lines (plus
+// the shared right-edge crop limit that excludes the icon/QR block).
+// Deliberately loose - a few extra pixels of a neighboring line bleeding
+// into the crop is fine, since the Gemini re-read is told to expect that.
+// Returns null only if fewer than 3 candidate bands exist at all.
+async function findKeyLineBands(sourceDataUrl) {
   const img = await dataUrlToImage(sourceDataUrl);
   const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
   const canvas = document.createElement('canvas');
@@ -1567,174 +1606,67 @@ async function segmentKeyCharacters(sourceDataUrl) {
   ctx.drawImage(img, 0, 0);
   const mask = buildInkMask(ctx, W, H);
 
-  const allBands = findLineBands(mask, W, H);
-  const bands = allBands.slice()
-    .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, 3)
-    .sort((a, b) => a[0] - b[0]);
+  const rightLimit = findRightDenseBlockStart(mask, W, H);
+  const textWidth = Math.max(1, rightLimit - 20);
+
+  const allBands = findRowBands(mask, W, H, textWidth);
+  if (allBands.length < 3) {
+    return { bands: null, debug: { bandCount: allBands.length, bandHeights: allBands.map(b => b[1] - b[0]), textWidth, sourceW: W, sourceH: H } };
+  }
+
+  // Drop obviously-too-short bands (noise slivers) before taking the
+  // first 3 in reading order - taking the tallest 3 was tried first and
+  // mis-picked a trailing noise band that happened to be taller than a
+  // genuine (short) line; position order is more trustworthy here than
+  // height ranking.
+  const heights = allBands.map(b => b[1] - b[0]).sort((a, b) => a - b);
+  const medianH = heights[Math.floor(heights.length / 2)];
+  const survivors = allBands.filter(b => (b[1] - b[0]) >= medianH * 0.5);
+  const chosen = survivors.slice(0, 3);
 
   const debug = {
     bandCount: allBands.length,
     bandHeights: allBands.map(b => b[1] - b[0]),
-    allBands,
-    usedBands: bands,
-    lineBlobCounts: [],
-    sourceW: W, sourceH: H
+    chosenBands: chosen,
+    textWidth, sourceW: W, sourceH: H
   };
 
-  if (bands.length !== 3) {
-    debug.failReason = `只偵測到 ${allBands.length} 個文字帶（需要 3 個）`;
-    return { rects: null, debug };
-  }
-
-  const expectedCounts = [10, 10, 5];
-  const rects = [];
-  for (let i = 0; i < 3; i++) {
-    const [y0, y1] = bands[i];
-    let blobs = findCharBlobs(mask, W, y0, y1);
-    debug.lineBlobCounts.push(blobs.length);
-    const expected = expectedCounts[i];
-    if (blobs.length < expected) {
-      debug.failReason = `第 ${i + 1} 行只切出 ${blobs.length} 個字元（需要 ${expected} 個）`;
-      return { rects: null, debug };
-    }
-    if (blobs.length > expected) {
-      // Extra blobs are almost always leftover noise (icon fragment,
-      // stray mark) rather than real characters - keep the WIDEST ones,
-      // since real character strokes are consistently wider than noise
-      // specks, then restore left-to-right order.
-      blobs = blobs.slice()
-        .sort((a, b) => (b[1] - b[0]) - (a[1] - a[0])).slice(0, expected)
-        .sort((a, b) => a[0] - b[0]);
-    }
-    for (const [x0, x1] of blobs) rects.push({ x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
-  }
-  return { rects, debug };
+  if (chosen.length < 3) return { bands: null, debug };
+  return { bands: { line0: chosen[0], line1: chosen[1], line2: chosen[2], textWidth, W, H }, debug };
 }
 
-// Debug aid: draws the FULL "guide frame" image (shrunk) with a red
-// rectangle marking exactly which pixel rect was used, so a bad
-// segmentation is visible at a glance instead of having to trust the
-// numbers.
-async function renderRectOverlay(sourceDataUrl, rect) {
-  try {
-    const img = await dataUrlToImage(sourceDataUrl);
-    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
-    const displayW = 360;
-    const scale = displayW / W;
-    const canvas = document.createElement('canvas');
-    canvas.width = displayW;
-    canvas.height = Math.round(H * scale);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = '#ff2d55';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(rect.x * scale, rect.y * scale, rect.w * scale, rect.h * scale);
-    return canvas.toDataURL('image/jpeg', 0.85);
-  } catch {
-    return null;
-  }
-}
-
-async function cropRectCanvas(sourceDataUrl, rect, targetH = 200) {
+// Crops one full-width line strip (generous vertical padding, no attempt
+// at horizontal precision - the whole point is not needing precision).
+async function cropLineCanvas(sourceDataUrl, yRange, textWidth) {
   const img = await dataUrlToImage(sourceDataUrl);
-  const padX = rect.w * 0.15, padY = rect.h * 0.15;
-  const x0 = Math.max(0, rect.x - padX), y0 = Math.max(0, rect.y - padY);
-  const x1 = rect.x + rect.w + padX, y1 = rect.y + rect.h + padY;
-  const cw = x1 - x0, ch = y1 - y0;
-  if (cw < 3 || ch < 3) return null;
-  const scale = targetH / ch;
+  const [y0raw, y1raw] = yRange;
+  const padY = (y1raw - y0raw) * 0.25;
+  const y0 = Math.max(0, y0raw - padY), y1 = y1raw + padY;
+  const targetH = 140;
+  const scale = targetH / (y1 - y0);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(cw * scale));
+  canvas.width = Math.max(1, Math.round(textWidth * scale));
   canvas.height = targetH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, x0, y0, cw, ch, 0, 0, canvas.width, canvas.height);
-  return { canvas, ctx };
+  ctx.drawImage(img, 0, y0, textWidth, y1 - y0, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.9);
 }
 
-// Deterministic geometry check, no API call: given the character's own
-// pixel rect (from segmentKeyCharacters), crops it, builds the same
-// HSV ink mask, and counts ink clusters per row across the LOWER portion
-// of the GLYPH'S OWN ink extent (not the padded crop box - the crop has
-// blank margin around the glyph that would otherwise throw off the
-// percentages). V's two diagonal strokes stay separate through most of
-// that range (2 clusters); Y's stem is one continuous stroke there
-// (1 cluster). Band and thresholds (60%-90% of glyph height, decide by
-// MEDIAN not mean) were tuned against an actual photographed character
-// from this label stock, where the fork on this font's "Y" turned out to
-// extend much lower than a generic assumption would guess, and a single
-// noisy row was enough to throw off a mean.
-async function classifyVorYFromRect(sourceDataUrl, rect) {
-  const empty = { result: null, rawDataUrl: null, binDataUrl: null };
-  try {
-    const cropped = await cropRectCanvas(sourceDataUrl, rect, 200);
-    if (!cropped) return empty;
-    const { canvas, ctx } = cropped;
-    const rawDataUrl = canvas.toDataURL('image/png');
-    const w = canvas.width, h = canvas.height;
-    const mask = buildInkMask(ctx, w, h);
-
-    const binImageData = ctx.createImageData(w, h);
-    for (let p = 0; p < mask.length; p++) {
-      const v = mask[p] ? 0 : 255;
-      binImageData.data[p * 4] = v; binImageData.data[p * 4 + 1] = v;
-      binImageData.data[p * 4 + 2] = v; binImageData.data[p * 4 + 3] = 255;
-    }
-    ctx.putImageData(binImageData, 0, 0);
-    const binDataUrl = canvas.toDataURL('image/png');
-
-    let gy0 = -1, gy1 = -1;
-    for (let y = 0; y < h; y++) {
-      let any = false;
-      for (let x = 0; x < w; x++) { if (mask[y * w + x]) { any = true; break; } }
-      if (any) { if (gy0 === -1) gy0 = y; gy1 = y; }
-    }
-    if (gy0 === -1) return { result: null, rawDataUrl, binDataUrl };
-    const gh = gy1 - gy0 + 1;
-    const bandTop = gy0 + Math.round(gh * 0.60);
-    const bandBottom = gy0 + Math.round(gh * 0.90);
-
-    const counts = [];
-    for (let y = bandTop; y <= bandBottom; y++) {
-      let clusters = 0, wasInk = false;
-      for (let x = 0; x < w; x++) {
-        const isInk = !!mask[y * w + x];
-        if (isInk && !wasInk) clusters++;
-        wasInk = isInk;
-      }
-      if (clusters > 0) counts.push(clusters);
-    }
-    if (counts.length < 5) return { result: null, rawDataUrl, binDataUrl };
-
-    counts.sort((a, b) => a - b);
-    const median = counts[Math.floor(counts.length / 2)];
-    let result = null;
-    if (median <= 1) result = 'Y';
-    else if (median >= 2) result = 'V';
-    return { result, rawDataUrl, binDataUrl };
-  } catch {
-    return empty;
-  }
-}
-
-// Fallback when geometry is inconclusive: ask Gemini again, but ONLY
-// about this one already-cropped, already-zoomed character, as a strict
-// binary choice. Much easier task than reading all 25 at once - still
-// fully automated, no operator involved.
-async function verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect) {
-  const empty = { result: null, cropDataUrl: null };
-  const cropped = await cropRectCanvas(sourceDataUrl, rect, 200);
-  if (!cropped) return empty;
-  const jpegUrl = cropped.canvas.toDataURL('image/jpeg', 0.92);
-  const base64 = jpegUrl.split(',')[1];
+// Asks Gemini to read ONLY this one short strip - a far easier task than
+// reading all 25 characters at once, and one it doesn't need any
+// coordinates to do. Returns a string of exactly `expectedCount`
+// characters, or null if the response didn't parse to that length.
+async function readLineWithGemini(apiKey, lineDataUrl, expectedCount, temperature) {
   const prompt = [
-    'This image shows exactly one printed character from a Windows product key label.',
-    'It is either the letter V or the letter Y - no other character is possible here.',
-    'V: two straight diagonal strokes meeting at a single point at the BOTTOM; open top; no vertical stem.',
-    'Y: a fork/V-shape only at the TOP that merges into one straight vertical stroke reaching the bottom.',
-    'Reply with exactly one character, either V or Y. No other text.'
+    `This image is one horizontal strip cropped from a Windows product key label.`,
+    `It may show a small icon (key symbol, empty checkbox, or a short dash/arrow) at the very left or right edge, and possibly a sliver of an adjacent line of text at the very top or bottom edge - IGNORE all of that.`,
+    `The actual product key text in this strip is exactly ${expectedCount} uppercase letters/digits printed left to right with no spaces, from the set BCDFGHJKMPQRTVWXY2346789 (occasionally also E, treated as a misread F).`,
+    `V vs Y are easy to confuse here: V is two diagonal strokes meeting at a point at the BOTTOM with an open top (no vertical stem). Y has a fork only at the TOP that merges into ONE straight vertical stroke reaching the bottom. Look for that lower vertical stem before deciding.`,
+    `Return strict JSON only: {"chars":"${'X'.repeat(expectedCount)}"} with exactly ${expectedCount} characters, nothing else.`
   ].join('\n');
+  const base64 = lineDataUrl.split(',')[1];
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
@@ -1746,59 +1678,54 @@ async function verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect) {
             { text: prompt },
             { inline_data: { mime_type: 'image/jpeg', data: base64 } }
           ] }],
-          generationConfig: { temperature: 0, maxOutputTokens: 5 }
+          generationConfig: { temperature, maxOutputTokens: 60, responseMimeType: 'application/json' }
         })
       }
     );
     incrementApiUsage();
-    if (!res.ok) return { result: null, cropDataUrl: jpegUrl };
+    if (!res.ok) return null;
     const data = await res.json();
-    const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
-    const result = text.startsWith('V') ? 'V' : text.startsWith('Y') ? 'Y' : null;
-    return { result, cropDataUrl: jpegUrl };
-  } catch {
-    return { result: null, cropDataUrl: jpegUrl };
-  }
-}
-
-// Orchestrates automatic resolution of every V/Y found in the OCR'd key:
-// locate each one ourselves via segmentKeyCharacters() (no Gemini
-// involved), geometry check first (instant, free), focused re-query as
-// fallback (one extra API call, only when geometry can't decide). Only
-// characters neither method can resolve end up in `stillUnresolved` -
-// that should be rare, and is the only thing that still surfaces a
-// manual-review prompt in the UI. `debugItems` carries everything needed
-// to visually inspect what happened (rect overlay, crop, which method
-// decided, final letter).
-// Debug aid: draws the full source image with each detected line band
-// outlined - green for the 3 bands actually used, gray for any extra
-// candidate bands that got filtered out. Lets you see at a glance whether
-// segmentation is finding the right lines at all, vs. finding too many
-// (icon/other text row also getting picked up) or too few (two lines
-// merging together because the gap between them wasn't clean enough).
-async function renderBandsOverlay(sourceDataUrl, allBands, usedBands) {
-  try {
-    const img = await dataUrlToImage(sourceDataUrl);
-    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
-    const displayW = 360;
-    const scale = displayW / W;
-    const canvas = document.createElement('canvas');
-    canvas.width = displayW;
-    canvas.height = Math.round(H * scale);
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const usedSet = new Set(usedBands.map(b => b.join(',')));
-    ctx.lineWidth = 2;
-    for (const [y0, y1] of allBands) {
-      ctx.strokeStyle = usedSet.has([y0, y1].join(',')) ? '#00ff88' : '#64748b';
-      ctx.strokeRect(0, y0 * scale, canvas.width, (y1 - y0) * scale);
-    }
-    return canvas.toDataURL('image/jpeg', 0.85);
+    const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+    const cleaned = text.replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    const chars = String(parsed.chars || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return chars.length === expectedCount ? chars : null;
   } catch {
     return null;
   }
 }
 
+// Reads the same line strip up to 3 times (self-consistency instead of
+// precision) and takes a per-character majority vote. A position where
+// all 3 reads disagree stays unresolved rather than guessing.
+async function resolveLineViaFocusedRereads(apiKey, lineDataUrl, expectedCount) {
+  const temps = [0, 0.3, 0.5];
+  const reads = [];
+  for (const t of temps) {
+    const r = await readLineWithGemini(apiKey, lineDataUrl, expectedCount, t);
+    if (r) reads.push(r);
+  }
+  if (!reads.length) return { result: null, reads };
+
+  let result = '';
+  for (let i = 0; i < expectedCount; i++) {
+    const counts = {};
+    for (const r of reads) counts[r[i]] = (counts[r[i]] || 0) + 1;
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    // Require actual majority (>1 vote, or unanimous with just 1 read) -
+    // a 3-way tie means genuinely unresolved, not a coin flip.
+    result += (sorted[0][1] > 1 || reads.length === 1) ? sorted[0][0] : '?';
+  }
+  return { result, reads };
+}
+
+// Orchestrates automatic resolution of every V/Y found in the OCR'd key:
+// group the flagged positions by which of the 3 label lines they fall in
+// (this label stock always prints 2 groups / 2 groups / 1 group across 3
+// lines), crop that whole line generously, and re-read it with the
+// focused prompt + self-consistency above. Only positions where that
+// still can't resolve end up in `stillUnresolved` - the only thing that
+// still surfaces a manual-review prompt in the UI.
 async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
   const chars = key.replace(/-/g, '').split('');
   const resolutionLog = [];
@@ -1810,59 +1737,66 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
     return { resolvedKey: key, resolutionLog, stillUnresolved, debugItems };
   }
 
-  const { rects, debug } = await segmentKeyCharacters(sourceDataUrl);
+  const { bands, debug } = await findKeyLineBands(sourceDataUrl);
+  if (!bands) {
+    for (const hit of ambiguousPositions) {
+      stillUnresolved.push({ position: hit.position, char: hit.char });
+      debugItems.push({
+        position: hit.position, original: hit.char, final: hit.char,
+        method: `找不到3行文字的分界（偵測到 ${debug.bandCount} 個候選帶，高度分別為 ${debug.bandHeights.join(', ')}px），需人工核對`
+      });
+    }
+    return { resolvedKey: key, resolutionLog, stillUnresolved, debugItems };
+  }
 
+  // line index 0/1/2 -> {yRange, startOffset (0-based char index this
+  // line starts at), count}
+  const lineDefs = [
+    { yRange: bands.line0, startOffset: 0, count: 10 },
+    { yRange: bands.line1, startOffset: 10, count: 10 },
+    { yRange: bands.line2, startOffset: 20, count: 5 }
+  ];
+
+  const byLine = new Map();
   for (const hit of ambiguousPositions) {
-    const pos = hit.position - 1;
-    const originalChar = chars[pos];
-    const rect = rects ? rects[pos] : null;
+    const globalIdx = hit.position - 1;
+    const lineIdx = globalIdx < 10 ? 0 : globalIdx < 20 ? 1 : 2;
+    if (!byLine.has(lineIdx)) byLine.set(lineIdx, []);
+    byLine.get(lineIdx).push(hit);
+  }
 
-    if (!rect) {
-      stillUnresolved.push({ position: hit.position, char: originalChar });
-      const bandOverlay = await renderBandsOverlay(sourceDataUrl, debug.allBands, debug.usedBands);
-      debugItems.push({
-        position: hit.position, original: originalChar, final: originalChar,
-        method: `本地字元分割失敗：${debug.failReason || '未知原因'}（偵測到 ${debug.bandCount} 個文字帶，高度分別為 ${debug.bandHeights.join(', ')}px；各行切出字元數：${debug.lineBlobCounts.join(', ') || '(尚未切到行)'}）`,
-        overlayDataUrl: bandOverlay
-      });
-      continue;
+  for (const [lineIdx, hits] of byLine.entries()) {
+    const def = lineDefs[lineIdx];
+    const lineCropDataUrl = await cropLineCanvas(sourceDataUrl, def.yRange, bands.textWidth);
+    const { result, reads } = await resolveLineViaFocusedRereads(apiKey, lineCropDataUrl, def.count);
+
+    for (const hit of hits) {
+      const pos = hit.position - 1;
+      const originalChar = chars[pos];
+      const localIdx = pos - def.startOffset;
+      const finalChar = result && result[localIdx] !== '?' ? result[localIdx] : null;
+
+      if (finalChar) {
+        resolutionLog.push(finalChar === originalChar
+          ? `第${hit.position}碼 focused re-read：確認為 ${finalChar}`
+          : `第${hit.position}碼 focused re-read：${originalChar} → ${finalChar}`);
+        chars[pos] = finalChar;
+        debugItems.push({
+          position: hit.position, original: originalChar, final: finalChar,
+          method: `整行重新聚焦辨識（${reads.length}/3 次有效讀取，多數決）`,
+          lineCropDataUrl, reads
+        });
+      } else {
+        stillUnresolved.push({ position: hit.position, char: originalChar });
+        debugItems.push({
+          position: hit.position, original: originalChar, final: originalChar,
+          method: reads.length
+            ? `整行重新讀取${reads.length}次，該位置沒有多數決（各次讀到不同字），需人工核對`
+            : '整行重新讀取失敗（Gemini 沒有回傳有效格式），需人工核對',
+          lineCropDataUrl, reads
+        });
+      }
     }
-
-    const overlayDataUrl = await renderRectOverlay(sourceDataUrl, rect);
-
-    const geo = await classifyVorYFromRect(sourceDataUrl, rect);
-    if (geo.result) {
-      resolutionLog.push(geo.result === originalChar
-        ? `第${hit.position}碼 幾何比對：確認為 ${geo.result}`
-        : `第${hit.position}碼 幾何比對：${originalChar} → ${geo.result}`);
-      chars[pos] = geo.result;
-      debugItems.push({
-        position: hit.position, original: originalChar, final: geo.result, method: '幾何比對（本地字元分割，非 AI 座標）',
-        overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl
-      });
-      continue;
-    }
-
-    const api = await verifyCharWithGeminiCropRect(apiKey, sourceDataUrl, rect);
-    if (api.result) {
-      resolutionLog.push(api.result === originalChar
-        ? `第${hit.position}碼 聚焦二次辨識：確認為 ${api.result}`
-        : `第${hit.position}碼 聚焦二次辨識：${originalChar} → ${api.result}`);
-      chars[pos] = api.result;
-      debugItems.push({
-        position: hit.position, original: originalChar, final: api.result,
-        method: '幾何無法判斷，改用聚焦二次辨識',
-        overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
-      });
-      continue;
-    }
-
-    stillUnresolved.push({ position: hit.position, char: originalChar });
-    debugItems.push({
-      position: hit.position, original: originalChar, final: originalChar,
-      method: '兩種方法都無法判斷',
-      overlayDataUrl, rawDataUrl: geo.rawDataUrl, binDataUrl: geo.binDataUrl, cropDataUrl: api.cropDataUrl
-    });
   }
 
   return {
@@ -1872,6 +1806,7 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
     debugItems
   };
 }
+
 
 // Renders what resolveAmbiguousChars() actually did for each V/Y position -
 // the raw crop (is the box even pointing at the right glyph?), the
@@ -1888,21 +1823,17 @@ function renderVyDebug(debugItems) {
     box.innerHTML = '';
     return;
   }
-  const thumb = (src, label) => src
-    ? `<div style="text-align:center;"><img src="${src}" style="height:60px; image-rendering:pixelated; border:1px solid var(--border); border-radius:4px; background:#fff;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">${label}</div></div>`
+  const lineThumb = (src) => src
+    ? `<div style="margin-bottom:6px;"><img src="${src}" style="width:100%; border:1px solid var(--border); border-radius:4px; background:#fff;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">送去重新聚焦辨識的整行裁切圖</div></div>`
     : '';
-  const overlayThumb = (src) => src
-    ? `<div style="text-align:center; margin-bottom:6px;"><img src="${src}" style="width:100%; max-width:300px; border:1px solid var(--border); border-radius:4px;"><div style="font-size:8px; color:var(--muted); margin-top:2px;">紅框＝程式算出的裁切位置（在完整送出圖上標示）</div></div>`
+  const readsList = (reads) => (reads && reads.length)
+    ? `<div style="font-size:9px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-top:2px;">3次讀取：${reads.map(r => `「${r}」`).join('、')}</div>`
     : '';
   box.innerHTML = debugItems.map(item => `
     <div style="display:flex; flex-direction:column; gap:4px; padding:8px; border:1px solid var(--border); border-radius:8px; min-width:150px; width:100%;">
       <div style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--accent);">第${item.position}碼：${item.original} → ${item.final}</div>
-      ${overlayThumb(item.overlayDataUrl)}
-      <div style="display:flex; gap:6px;">
-        ${thumb(item.rawDataUrl, '原始裁切')}
-        ${thumb(item.binDataUrl, '二值化')}
-        ${thumb(item.cropDataUrl, '送去二次辨識')}
-      </div>
+      ${lineThumb(item.lineCropDataUrl)}
+      ${readsList(item.reads)}
       <div style="font-size:9px; color:var(--muted); font-family:'Share Tech Mono',monospace;">${item.method}</div>
     </div>
   `).join('');
