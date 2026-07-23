@@ -614,15 +614,15 @@
 
   .qr-key-confirm .key-group.edited {
     border-style: solid;
-    border-color: var(--accent2);
-    color: var(--accent2);
-    background: rgba(255,107,53,0.08);
-  }
-
-  .qr-key-confirm .key-group.warn-chars {
     border-color: var(--warn);
     color: var(--warn);
     background: rgba(255,214,10,0.08);
+  }
+
+  .qr-key-confirm .key-group.warn-chars {
+    border-color: #ff3b3b;
+    color: #ff3b3b;
+    background: rgba(255,59,59,0.08);
   }
 
   .qr-key-confirm .key-group.editing {
@@ -748,7 +748,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.6</div>
+      <div class="version-badge" id="app-version">V3.5</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -933,7 +933,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.6';
+const APP_VERSION = 'V3.7';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
