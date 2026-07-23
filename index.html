@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">V3.8</div>
+      <div class="version-badge" id="app-version">V3.6</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -851,7 +851,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'V3.8';
+const APP_VERSION = 'V3.6';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1305,6 +1305,22 @@ async function processImageV2(dataUrl, containerAspect) {
     const eToFCount = (key.match(/E/g) || []).length;
     if (eToFCount > 0) key = key.replace(/E/g, 'F');
 
+    // Automatically resolve every V/Y Gemini flagged in its first pass -
+    // geometry check first (instant), focused re-query as fallback (one
+    // extra API call, only when geometry can't decide). This runs
+    // unconditionally, with no operator involvement; only a character
+    // neither method can resolve ever reaches the manual-review UI below.
+    let ambiguousResolution = null;
+    if (key && Array.isArray(result.ambiguous) && result.ambiguous.length) {
+      const sourceImg = images.find(i => i.label === 'guide frame - color');
+      if (sourceImg) {
+        statusEl.textContent = '自動核對 V/Y 等易混淆字元...';
+        ambiguousResolution = await resolveAmbiguousChars(apiKey, key, result.ambiguous, sourceImg.dataUrl);
+        if (runId !== scanRunId) return;
+        key = ambiguousResolution.resolvedKey;
+      }
+    }
+
     candidateKey = key;
     ocrResult.confidence = Number(result.confidence || 0) * (Number(result.confidence || 0) <= 1 ? 100 : 1);
 
@@ -1315,13 +1331,21 @@ async function processImageV2(dataUrl, containerAspect) {
       `OCR: ${ocrResult.model}`,
       ocrResult.confidence != null ? `Confidence: ${Math.round(ocrResult.confidence)}%` : '',
       eToFCount ? `Auto-corrected: E→F ×${eToFCount}` : '',
+      ambiguousResolution?.resolutionLog?.length ? `V/Y auto-check:\n${ambiguousResolution.resolutionLog.join('\n')}` : '',
       key ? `Detected: ${key}` : (candidateKey ? `Candidate: ${candidateKey}` : 'Detected: NOT_FOUND')
     ].filter(Boolean).join('\n');
 
     if (key) {
       const lowConfidence = ocrResult.confidence != null && ocrResult.confidence < CONFIDENCE_RETAKE_THRESHOLD;
       const badChars = findInvalidKeyChars(key);
-      const ambiguousHits = findAmbiguousKeyPositions(key);
+      // Only characters that survived BOTH automated resolution steps above
+      // (or that Gemini never flagged as ambiguous in the first place, e.g.
+      // if it missed reporting a box) still need a human look. In normal
+      // operation this should be empty almost every time.
+      const unresolvedFromApi = ambiguousResolution?.stillUnresolved || [];
+      const covered = ambiguousResolution?.coveredPositions || new Set();
+      const missedByApi = findAmbiguousKeyPositions(key).filter(hit => !covered.has(hit.position));
+      const ambiguousHits = [...unresolvedFromApi, ...missedByApi];
       if (badChars.length) {
         // These characters are documented (and code-verified via Microsoft's
         // own key-decoding algorithm - base24 = BCDFGHJKMPQRTVWXY2346789) to
@@ -1337,11 +1361,11 @@ async function processImageV2(dataUrl, containerAspect) {
         setOcrStatus('warning', `${ocrResult.model} 信心值偏低 (${Math.round(ocrResult.confidence)}%)，請仔細核對每個字元，必要時重拍`);
         showConfirm(key, { verified: false, ambiguousHits }); // force manual double-check even if "skip confirm" is on
       } else if (ambiguousHits.length) {
-        // V and Y are both individually valid characters, so a wrong pick
-        // won't trip findInvalidKeyChars() above. Force manual review just
-        // for these positions rather than skipping straight to the QR.
+        // Both automated checks (geometry + focused re-query) failed to
+        // resolve this one - genuinely rare (bad crop/blur/dirt on exactly
+        // that glyph). This is the only remaining path to manual review.
         const positions = ambiguousHits.map(h => `第${h.position}碼(${h.char})`).join('、');
-        setOcrStatus('warning', `⚠ ${positions} 為易混淆字元，請放大核對後再產生 QR`);
+        setOcrStatus('warning', `⚠ 自動核對仍無法判斷 ${positions}，請放大核對後再產生 QR`);
         showConfirm(key, { verified: false, ambiguousHits });
       } else if (shouldSkipConfirm()) {
         generateQRForKey(key);
@@ -1393,10 +1417,11 @@ function findInvalidKeyChars(key) {
 // Characters that are both individually valid (appear in the base24 key
 // alphabet) but get visually confused with each other on this label stock,
 // so a wrong pick won't get caught by findInvalidKeyChars(). Unlike E->F,
-// there's no safe auto-correct here since either letter could be genuinely
-// correct - instead we flag WHERE (1-indexed position within the 25-char
-// key, ignoring dashes) they occur so a human can zoom in on just those
-// characters instead of re-checking all 25.
+// there's no single safe substitution - instead these get resolved
+// automatically via resolveAmbiguousChars() below (geometry check, then a
+// focused re-query as fallback). findAmbiguousKeyPositions() is now only a
+// last-resort safety net for the rare case neither automated method
+// resolves a character.
 const AMBIGUOUS_KEY_PAIRS = { V: 'V/Y', Y: 'V/Y' };
 
 function findAmbiguousKeyPositions(key) {
@@ -1411,6 +1436,172 @@ function findAmbiguousKeyPositions(key) {
   return hits;
 }
 
+// Converts Gemini's normalized 0-1000 bounding box into a padded pixel
+// rect on the actual image it was measured against.
+function boxToPixelRect(box, W, H, padFrac = 0.15) {
+  let [ymin, xmin, ymax, xmax] = box;
+  let x0 = (xmin / 1000) * W, y0 = (ymin / 1000) * H;
+  let x1 = (xmax / 1000) * W, y1 = (ymax / 1000) * H;
+  const padX = (x1 - x0) * padFrac, padY = (y1 - y0) * padFrac;
+  x0 = Math.max(0, x0 - padX); y0 = Math.max(0, y0 - padY);
+  x1 = Math.min(W, x1 + padX); y1 = Math.min(H, y1 + padY);
+  return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
+
+async function cropGlyphCanvas(sourceDataUrl, box, targetH = 160) {
+  const img = await dataUrlToImage(sourceDataUrl);
+  const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+  const rect = boxToPixelRect(box, W, H);
+  if (rect.w < 3 || rect.h < 3) return null;
+  const scale = targetH / rect.h;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(rect.w * scale));
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
+  return { canvas, ctx };
+}
+
+// Deterministic geometry check, no API call: crops just the one glyph
+// Gemini pointed at, binarizes it, and counts how many separate ink
+// clusters appear per row across the LOWER half of the character.
+// V's two diagonal arms are still separate strokes through most of the
+// lower half (2 clusters); Y's stem is a single continuous stroke there
+// (1 cluster). This is the same kind of per-character geometric test a
+// license-plate reader uses instead of re-asking an LLM to eyeball it.
+// Returns 'V', 'Y', or null if the signal is too weak/noisy to trust
+// (bad crop, dirt, blur) - callers should fall back to a focused re-query
+// rather than accept a low-confidence geometry guess.
+async function classifyVorYFromBox(sourceDataUrl, box) {
+  try {
+    const cropped = await cropGlyphCanvas(sourceDataUrl, box, 160);
+    if (!cropped) return null;
+    const { canvas, ctx } = cropped;
+    enhanceForOcr(ctx, canvas.width, canvas.height, 'threshold');
+    const { width, height, data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    const bandTop = Math.round(height * 0.40);
+    const bandBottom = Math.round(height * 0.85);
+    const step = Math.max(1, Math.round((bandBottom - bandTop) / 10));
+    const rowClusterCounts = [];
+    for (let y = bandTop; y <= bandBottom; y += step) {
+      let clusters = 0, wasInk = false;
+      for (let x = 0; x < width; x++) {
+        const isInk = data[(y * width + x) * 4] < 128; // binarized: near-0 = ink
+        if (isInk && !wasInk) clusters++;
+        wasInk = isInk;
+      }
+      if (clusters > 0) rowClusterCounts.push(clusters);
+    }
+    if (rowClusterCounts.length < 3) return null; // not enough signal to trust
+
+    const avg = rowClusterCounts.reduce((a, b) => a + b, 0) / rowClusterCounts.length;
+    if (avg <= 1.25) return 'Y'; // one continuous stem
+    if (avg >= 1.75) return 'V'; // two separate diagonal strokes
+    return null; // straddles the middle - genuinely ambiguous crop, don't guess
+  } catch {
+    return null;
+  }
+}
+
+// Fallback when geometry is inconclusive: ask Gemini again, but ONLY about
+// this one already-cropped, already-zoomed character, as a strict binary
+// choice. This is a much easier task than reading all 25 characters at
+// once and is far more reliable for the specific V/Y case - still fully
+// automated, no operator involved.
+async function verifyCharWithGeminiCrop(apiKey, sourceDataUrl, box) {
+  const cropped = await cropGlyphCanvas(sourceDataUrl, box, 200);
+  if (!cropped) return null;
+  const jpegUrl = cropped.canvas.toDataURL('image/jpeg', 0.92);
+  const base64 = jpegUrl.split(',')[1];
+  const prompt = [
+    'This image shows exactly one printed character from a Windows product key label.',
+    'It is either the letter V or the letter Y - no other character is possible here.',
+    'V: two straight diagonal strokes meeting at a single point at the BOTTOM; open top; no vertical stem.',
+    'Y: a fork/V-shape only at the TOP that merges into one straight vertical stroke reaching the bottom.',
+    'Reply with exactly one character, either V or Y. No other text.'
+  ].join('\n');
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: prompt },
+            { inline_data: { mime_type: 'image/jpeg', data: base64 } }
+          ] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 5 }
+        })
+      }
+    );
+    incrementApiUsage(); // this call reached Google and counts against real quota
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
+    if (text.startsWith('V')) return 'V';
+    if (text.startsWith('Y')) return 'Y';
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Orchestrates automatic resolution of every V/Y Gemini flagged in the
+// first pass: geometry check first (instant, free), focused re-query as
+// fallback (costs one extra API call, only when geometry can't decide).
+// Only characters neither method can resolve end up in `stillUnresolved` -
+// that list should be rare, and is the only thing that still surfaces a
+// manual-review prompt in the UI.
+async function resolveAmbiguousChars(apiKey, key, ambiguousList, sourceDataUrl) {
+  const chars = key.replace(/-/g, '').split('');
+  const resolutionLog = [];
+  const stillUnresolved = [];
+  const coveredPositions = new Set();
+
+  for (const item of (ambiguousList || [])) {
+    const pos = Number(item?.index) - 1;
+    if (!Number.isInteger(pos) || pos < 0 || pos >= chars.length) continue;
+    if (!/^[VY]$/.test(chars[pos])) continue; // sanity: position must actually hold V or Y
+    coveredPositions.add(pos + 1);
+
+    if (!Array.isArray(item.box) || item.box.length !== 4) {
+      stillUnresolved.push({ position: pos + 1, char: chars[pos] });
+      continue;
+    }
+
+    const geoResult = await classifyVorYFromBox(sourceDataUrl, item.box);
+    if (geoResult) {
+      resolutionLog.push(geoResult === chars[pos]
+        ? `第${pos + 1}碼 幾何比對：確認為 ${geoResult}`
+        : `第${pos + 1}碼 幾何比對：${chars[pos]} → ${geoResult}`);
+      chars[pos] = geoResult;
+      continue;
+    }
+
+    const apiResult = await verifyCharWithGeminiCrop(apiKey, sourceDataUrl, item.box);
+    if (apiResult) {
+      resolutionLog.push(apiResult === chars[pos]
+        ? `第${pos + 1}碼 聚焦二次辨識：確認為 ${apiResult}`
+        : `第${pos + 1}碼 聚焦二次辨識：${chars[pos]} → ${apiResult}`);
+      chars[pos] = apiResult;
+      continue;
+    }
+
+    stillUnresolved.push({ position: pos + 1, char: chars[pos] });
+  }
+
+  return {
+    resolvedKey: chars.join('').match(/.{1,5}/g).join('-'),
+    resolutionLog,
+    stillUnresolved,
+    coveredPositions
+  };
+}
+
 const CONFIDENCE_RETAKE_THRESHOLD = 60;
 
 async function readWindowsKeyWithGemini(apiKey, images) {
@@ -1421,8 +1612,9 @@ async function readWindowsKeyWithGemini(apiKey, images) {
     'Ignore barcodes, QR codes, the "howtotell.com" website text itself, part numbers, dates, labels, and "Windows 11 IOT".',
     'These character pairs are easy to confuse in print - look closely at each one before deciding: E vs F (E has 3 horizontal strokes, F has only 2 - no bottom stroke), 0 vs O, 1 vs I, 5 vs S, 8 vs B, 6 vs G. Do not default to the more common-looking letter; read the actual strokes present.',
     'V vs Y is especially easy to misread on this label stock: V is two straight diagonal strokes meeting at a single point at the BOTTOM, with an open top (like a checkmark shape, no vertical stem). Y has a fork/V-shape only at the TOP that merges into one straight vertical stroke going down to the bottom edge of the character. If the shape has any straight vertical segment in its lower half, it is Y, not V. Zoom in mentally on each occurrence of V or Y and check specifically for that lower vertical stem before deciding.',
+    'For every V or Y character in the key, also report its bounding box so it can be double-checked automatically: add a field "ambiguous", an array with one object per V/Y character, each {"index": N, "char": "V or Y", "box": [ymin,xmin,ymax,xmax]}. "index" is that character\'s 1-based position counting only letters/digits in the key, ignoring dashes (so the first character of the first group is index 1, the first character of the second group is index 6, etc). "box" is 4 integers 0-1000, normalized to the width/height of the FIRST image you were given (labeled "guide frame - color"), tightly bounding just that single character - not the whole group. If the key has no V or Y, return "ambiguous": [].',
     'Return strict JSON only:',
-    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short"}',
+    '{"key":"XXXXX-XXXXX-XXXXX-XXXXX-XXXXX","confidence":0.0,"notes":"short","ambiguous":[]}',
     'If you cannot read all 25 characters, return {"key":"NOT_FOUND","confidence":0,"notes":"why"}.',
     'Never return the placeholder XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.',
     'Do not use OCR guesses from other image variants as evidence; read the photo directly.',
@@ -1452,7 +1644,7 @@ async function readWindowsKeyWithGemini(apiKey, images) {
           contents: [{ parts }],
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 120,
+            maxOutputTokens: 300,
             responseMimeType: 'application/json'
           }
         })
