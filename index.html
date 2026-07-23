@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">test1</div>
+      <div class="version-badge" id="app-version">TEST2</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -794,11 +794,6 @@
       <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">OCR 原始辨識文字</div>
       <div id="ocr-raw" style="font-family:'Share Tech Mono',monospace; font-size:11px; color:var(--muted); background:rgba(0,0,0,0.3); border-radius:8px; padding:10px; white-space:pre-wrap; word-break:break-all; max-height:120px; overflow-y:auto; min-height:36px;">等待辨識...</div>
     </div>
-
-    <div id="vy-debug-wrap" style="display:none; margin-top:10px;">
-      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">V/Y 判斷除錯（裁切框 / 二值化後）</div>
-      <div id="vy-debug" style="display:flex; flex-wrap:wrap; gap:10px; background:rgba(0,0,0,0.3); border-radius:8px; padding:10px;"></div>
-    </div>
   </div>
 
   <!-- STEP 3: 確認序號 -->
@@ -820,6 +815,11 @@ XXXXX"
     <div id="key-valid-hint" style="font-size:10px; font-family:'Share Tech Mono',monospace; margin-bottom:6px; color:var(--muted);"></div>
 
     <div id="key-ambiguous-hint" style="display:none; font-size:11px; line-height:1.5; font-family:'Share Tech Mono',monospace; margin-bottom:12px; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,214,10,0.4); background:rgba(255,214,10,0.08); color:var(--warn);"></div>
+
+    <div id="vy-debug-wrap" style="display:none; margin-bottom:12px;">
+      <div style="font-size:9px; letter-spacing:2px; color:var(--muted); font-family:'Share Tech Mono',monospace; margin-bottom:6px; text-transform:uppercase;">V/Y 判斷除錯（裁切框 / 二值化後）</div>
+      <div id="vy-debug" style="display:flex; flex-wrap:wrap; gap:10px; background:rgba(0,0,0,0.3); border-radius:8px; padding:10px;"></div>
+    </div>
 
     <button class="btn btn-success" id="btn-gen-qr" onclick="generateQR()">
       ✅ 確認，產生 QR Code
@@ -856,7 +856,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'test1';
+const APP_VERSION = 'TEST2';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
