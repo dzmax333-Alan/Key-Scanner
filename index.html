@@ -665,7 +665,7 @@
     <div class="logo-line">
       <div class="logo-icon">🔑</div>
       <h1>Key Scanner</h1>
-      <div class="version-badge" id="app-version">test8</div>
+      <div class="version-badge" id="app-version">test9</div>
     </div>
     <div class="subtitle">Windows 序號辨識系統</div>
   </header>
@@ -865,7 +865,7 @@ XXXXX"
 <canvas id="capture-canvas" style="display:none;"></canvas>
 
 <script>
-const APP_VERSION = 'test8';
+const APP_VERSION = 'test9';
 let stream = null;
 let apiQrStream = null;
 let apiQrScanFrame = null;
@@ -1770,11 +1770,34 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
     const lineCropDataUrl = await cropLineCanvas(sourceDataUrl, def.yRange, bands.textWidth);
     const { result, reads } = await resolveLineViaFocusedRereads(apiKey, lineCropDataUrl, def.count);
 
+    // Sanity check BEFORE trusting anything from this crop: compare the
+    // re-read against the characters we already have at every position
+    // in this line that ISN'T one of the flagged ambiguous ones. If this
+    // crop actually landed on the wrong line (label framing varies photo
+    // to photo - "Howtotell.com" sometimes ends up as its own extra row,
+    // shifting every line down by one), the re-read will mostly disagree
+    // with characters we're otherwise confident about, and using it would
+    // silently overwrite correct data with a different line's text. That
+    // is worse than staying unresolved, so require the re-read to mostly
+    // agree with what we already know before accepting any of it.
+    const hitLocalIdxs = new Set(hits.map(h => (h.position - 1) - def.startOffset));
+    let refMatches = 0, refTotal = 0;
+    if (result) {
+      for (let i = 0; i < def.count; i++) {
+        if (hitLocalIdxs.has(i)) continue;
+        const known = chars[def.startOffset + i];
+        if (!known) continue;
+        refTotal++;
+        if (result[i] === known) refMatches++;
+      }
+    }
+    const crossCheckOk = refTotal < 2 || (refMatches / refTotal) >= 0.7;
+
     for (const hit of hits) {
       const pos = hit.position - 1;
       const originalChar = chars[pos];
       const localIdx = pos - def.startOffset;
-      const finalChar = result && result[localIdx] !== '?' ? result[localIdx] : null;
+      const finalChar = (result && crossCheckOk && result[localIdx] !== '?') ? result[localIdx] : null;
 
       if (finalChar) {
         resolutionLog.push(finalChar === originalChar
@@ -1783,16 +1806,20 @@ async function resolveAmbiguousChars(apiKey, key, sourceDataUrl) {
         chars[pos] = finalChar;
         debugItems.push({
           position: hit.position, original: originalChar, final: finalChar,
-          method: `整行重新聚焦辨識（${reads.length}/3 次有效讀取，多數決）`,
+          method: `整行重新聚焦辨識（${reads.length}/3 次有效讀取，多數決，交叉比對 ${refMatches}/${refTotal} 相符）`,
           lineCropDataUrl, reads
         });
       } else {
         stillUnresolved.push({ position: hit.position, char: originalChar });
         debugItems.push({
           position: hit.position, original: originalChar, final: originalChar,
-          method: reads.length
-            ? `整行重新讀取${reads.length}次，該位置沒有多數決（各次讀到不同字），需人工核對`
-            : '整行重新讀取失敗（Gemini 沒有回傳有效格式），需人工核對',
+          method: !result
+            ? (reads.length
+                ? `整行重新讀取${reads.length}次，該位置沒有多數決（各次讀到不同字），需人工核對`
+                : '整行重新讀取失敗（Gemini 沒有回傳有效格式），需人工核對')
+            : !crossCheckOk
+              ? `交叉比對失敗（${refMatches}/${refTotal} 相符，可能切到別行），不採用此結果，需人工核對`
+              : '該位置沒有多數決，需人工核對',
           lineCropDataUrl, reads
         });
       }
